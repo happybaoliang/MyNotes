@@ -1,0 +1,622 @@
+# 概述
+## 必要性
+AI非常有必要进入嵌入式系统，但是实时性和功耗是两大问题。另外，还有处理能力以及存储容量的限制。
+
+在移动设备上运行深度学习应用可以用更好的实时性、隐私性、更少的网络带宽需要求。
+
+我们要把繁琐和重复计算交给计算机，我们留下创造力。
+
+
+##应用
+Most state-of-the-art CNNs reach their high performance at the price of exponentially higher computational complexity and exponentially increased memory requirements.
+
+Company | Accelerator | Training | Inference | Tera Ops/s | Power
+:-: | :-: | :-: | :-: | :-: | :-:
+Google |  TPU1 (ASIC)  | N  | Y  | 92(Int)  | 40
+Google  | TPU2 (ASIC)  | Y  | Y  | 180fp  | x
+Nvidia  | Volta V100 (ASIC) |  Y  | Y  | 120  | Tensor  | 300
+Microsoft  | Catapult (FPGA) |  N  | Y  | X  | 22.7
+寒武纪 |  PuDianNao(ASIC)  | Y  | Y  | ~1  | 0.596
+
+
+## 难度
+神经网络既是计算密集的，又是访存密集的。而嵌入式设备的处理能力以及存储容量又通常是资源受限的。对CNN的加速技巧主要是面向嵌入式设备的。
+
+卷积神经网络在图像理解中表现最优，但是计算量巨大，用于视频流图像分类涉及万亿次乘加操作，图像分离和标签计算量更大。
+
+## 常见网络拓扑结构
+三类神经网络：FNN,CNN,RNN
+
+前馈神经网络只允许相邻层相互连接，组成有向无环图。
+
+RNN是带有有向环的神经网络，非常适合处理time-dependent的信号，主要用于语音识别和自然语言处理。但是RNN不易训练，而且不易扩展。作为RNN的一个变种，LSTM(Long Short-Term Memory)网络在一定程度上缓解了这些问题。
+
+CNN适合操作二维数据，因此广泛应用于图像分类、目标检测、场景标签等。CNN自2012年AlexNet开始统治图像分类领域。但是最早由1980年代由LeCun引入，最早用于识别数字。
+
+Why convolution for recognition?
+* Translation invariance
+* Fewer Parameters
+* Stride can > 1 (accuracy and computation tradeoff)
+* dependencies are local
+
+包含全连接层的前馈网络又称为Multilayer Perception(MLP)。
+
+只含有卷积层的CNN称为全卷称网络，需要较少的内存带宽，也更加规整。全卷积CNN的权重可以被重复使用多次，而全连接层在每次乘加运算时都需要加载一次权重。另外，全卷积层不需要pooling层，因此CNN会比较规整。
+
+神经网络的每一层对上一层的数据进行一个抽象得出一系列的决策，然后下一层在对这一层得出的决策再进行一个抽象的到更高层次的决策，就这样一层一层下去，直到最后一层的出一个终极决策，输出结果。
+
+对于人脸识别，神经网络的第一层从原始图片中提取人脸的轮廓和边缘，每个神经元学习到不同边缘的信息；网络的第二层将第一层学得的边缘信息组合起来，形成人脸的一些局部的特征，例如眼睛、嘴巴等；后面的几层逐步将上一层的特征组合起来，形成人脸的模样。
+
+随着神经网络层数的增加，特征也从原来的边缘逐步扩展为人脸的整体，由整体到局部，由简单到复杂。层数越多，那么模型学习的效果也就越精确。
+
+对于语音识别，第一层神经网络可以学习到语言发音的一些音调，后面更深层次的网络可以检测到基本的音素，再到单词信息，逐渐加深可以学到短语、句子。
+
+所以从上面的两个例子可以看出随着神经网络的深度加深，模型能学习到更加复杂的问题，功能也更加强大。
+
+
+##训练
+最常用的网络训练方法是监督学习，需要一系列带有标签的样本数据。
+
+One optimization pass through all training examples is called a training epoch.一个完整的训练可能需要多个epoch.每隔几个epoch需要用一些没有用于训练的样本(20%-25%）来检验一次网络。
+
+用于训练神经网络最常用的优化方法是随机梯度下降，算法计算一个描述每个权重对错误的影响程度的梯度向量(通过反向传播)，然后按梯度的反方向调整权重，调整的幅度称为学习速率。批量梯度下降(Batch Gradient Descent)是对梯度下降的向量化，使之能在GPU、DSP上高级并行。
+
+权重的初值选择非常重要，会影响到训练速度及结果，令W=0会阻止学习进程。
+
+深度神经网络由于过拟合和梯度消失的问题，不易训练。通过增加数据集可以解决overfitting问题，另外，改变网络结构、利用data argument(镜像、旋转、颜色变换等)也可以。
+
+training CNN requires experence, and is even considered more art than science.
+
+Nvidia Deep Learning Training System: GPU训练工具
+
+在FPGA上训练深度网络的研究还比较少。
+
+网络训练通常采用随机梯度下降的方法。
+
+当一副照片中含有的信息越多，对神经网络而言，干扰就越多，就越不容易突出重点。因此在训练时通常采用非常小的图像，例如244x244。
+
+如果在初始时，两个隐藏神经元的参数设置为相同的大小，那么两个隐藏神经元对输出单元的影响也是相同的，通过反向梯度下降去进行计算的时候，会得到同样的梯度大小，所以在经过多次迭代后，两个隐藏层单位仍然是对称的。无论设置多少个隐藏单元，其最终的影响都是相同的，那么多个隐藏神经元就没有了意义。
+
+在初始化的时候， W 参数要进行随机初始化， b 则不存在对称性的问题它可以设置为0。
+
+
+##规则化
+ 监督机器学习问题无非就是“minimizeyour error while regularizing your parameters”，也就是在规则化参数的同时最小化误差。最小化误差是为了让我们的模型拟合我们的训练数据，而规则化参数是防止我们的模型过分拟合我们的训练数据。但训练误差小并不是我们的最终目标，我们的目标是希望模型的测试误差小，也就是能准确的预测新的样本。所以，我们需要保证模型“简单”的基础上最小化训练误差，这样得到的参数才具有好的泛化性能（也就是测试误差也小），而模型“简单”就是通过规则函数来实现的。[范数与规则化][10]实际上是通过增惩罚项来降低过拟合。
+
+关于“参数越大模型越复杂”这个事情，大致是这样的：越是复杂的模型，越是会尝试对所有的样本进行拟合，甚至包括一些异常样本点，这就很容易造成在较小的区间里预测值产生较大的波动，这种较大的波动也反映了在这个区间里的导数很大，而只有较大的参数值才能产生较大的导数。因此复杂的模型，其参数值比较大 。
+
+#CNN的介绍
+##基本概念
+1.卷积层：k>1时有border effect，输出每个边需要补$\lfloor\frac{k}{2}\rfloor$个0，步长S可以减少输出特征映射的维度：$W_{out}=W_{in}/S$, $H_{out}=H_{in}/S$。CNN中图像与$k\times k$的filter的点积:$$<A,B>=\sum_{i=0}^{k-1}\sum_{j=0}^{k-1}A_{i,j}\cdot B_{i,j}$$
+
+2.线性化层：
+
+3.非线性化层: 神经元的输出$y=f(\sum_{i=0}^nw_ix_i+b)$,其中函数参数表示的是线性层，$f(\cdot)$为非线性层。
+
+激活函数是神经网络中非线性的来源，因为如果去掉这些函数，那么整个网络就只剩下线性运算，线性运算的复合还是线性运算的，最终的效果只相当于单层的线性模型。
+
+常见的非线性化函数：
+
+* ReLU: $f(x)=\max(0,x)$
+* Sigmoidal: $f(x)=1/(1+e^{-x})=tanh(x)$计算复杂而且收敛很慢，好处是函数的一阶层数可以用自己表示$$\sigma^{'}(x)=\sigma(x)(1-\sigma(x))$$,块处是随着x的变大，层数越来越小，存在梯度消失的问题。
+* 参数化PReLU: $f(x)=\max(ax,x)$，一个特例是leaky ReLU:a=max(0.01z,z)
+* maxout:
+* ELU:
+* $tanh(x)=\frac{e^z-e^{-z}}{e^z-e^{-z}}$
+
+对于隐藏层，tanh函数的表现好于sigmoid，因为它的取值范围为[-1,+1],输出分布在０值的附近而且均值为０，从隐藏层到输出层数据起到了归一化（均值为０）的效果。对于输出层，对于二分类任务的输出取值为０和１，一般会选择sigmoid函数.然而sigmoid和tanh函数在当 |z| 很大的时候，梯度会很小，在依据梯度的算法中，更新在后期会变得很慢。在实际应用中，要使 |z| 尽可能的落在0值附近。ReLU弥补了前两者的缺陷，当 z>0 时，梯度始终为1，从而提高神经网络基于梯度算法的运算速度。然而当 z<0 时，梯度一直为0，但是实际的运用中，该缺陷的影响不是很大。
+
+输出层一般会有特定的激活函数，不能随意改变，比如二分类一般用sigmoid函数激活，多分类一般用softmax激活。
+
+Leaky ReLU保证在 z<0 的时候，梯度仍然不为0。
+
+4.Pooling Layers: 将多个输入像素取最大值或者相加取平均得到一个输出像素以降低维度，又称为下采样。主要用于缩小特征尺寸，现在用的越来越少。该层的计算公式$$Out(f_0,x,y)=\max_{0\leq(k_x,k_y)\leq K}In(f_i,x+k_x,y+k_y)$$其中K称为pooling kernel size。pooling是downsample的一种实现方式。
+
+5.全连接层：计算权重与输入特征映射的内积:$$Out(f_0)=\sum_{f_i=0}^{N_{f_i}}W(f_i,f_o)\times In(f_i)$$
+通常在图像分类应用中做为最后一层来计算class score。全连接层本质上是执行矩阵向量乘运算。这一层通常是带宽受限的，而且很难开发数据局部性。在训练过程中，可以彩batching的方法来利用局部性，输入多个激活向量以复用权重参数，但是在嵌入式实时应用中因为延迟的原因无法应用batching的方法。全连接层广泛应用于RNN和LSTM中，它的参数完全不能复用，访存非常密集。在一些目标检测算法中，全连接层的计算时间几乎占到总时间的３８%左右。在DNN中，全连接层可以用下面的公式来表示：$$b=f(Wa+v)$$其中a,b分别为输入激活向量、输出激活向量以及偏置向量。$f(\cdot)$通常是ReLU函数。全连接层的特点是向量非常宽，而且没有任何的局部性。例如在AlexNet的FC-7中，每个向量有4K个浮点数组成，而权重矩阵则有$4k\times 4k$个浮点数。
+
+6.Local Response Normalization Layer: 在AlexNet中引用
+
+7.Batch Normalization Layers:
+
+8.DroupOut Layer: 解决大型CNN中的overfitting问题，在训练过程中随机丢弃一些连接。
+
+9.softmax层：最常用的分类器，通常放在图像分类CNN的最后一个卷积层或者全连接层之后，生成属于每一类的概率$P_i=e^{z_i}/\sum_ke^{z_k}$. Sigmoid函数只能进行二分类，而softmax能进行多分类，是sigmoid函数的扩展。
+
+在神经网络中，以相邻两层为观测对象，两层之间的权重参数矩阵大小为$N_{out}\times N_{in}$，bias参数矩阵的大小为$N_{out}\times 1$
+
+假定在m个训练样本的神经网络中，计算神经网络的输出，用向量化的方法去实现可以避免在程序中使用for循环，提高计算的速度。
+
+
+## 原理
+任何采用有限数量神经元的二层神经网络都是universal approximator，可以以任意精度近似任何连续函数，详见[Nielsen][3]第四章。
+
+## CNN核心算法
+CNN每一层的输入是一系列输入特征映射($H_{in}\times W_{in}$)，输出是一系列输出特征映射($H_{out}\times W_{out}$)，输出是由输入和filter kernel通过卷积计算得到的。本层的输出成为下一层的输入。
+
+一个卷积层包含$CH_{in}\times CH_{out}$个卷积核。如果使用全连接网络，则需要$(H_{in}\times W_{in}\times CH_{in})\times (H_{out}\times W_{out}\times CH_{out})$个参数。由于图像信息具有局部性，因此不需要使用全连接网络，因此将全连接层换成卷积层，卷核就是一个权重，共需要$k^2\times CH_{in}\times H_{out}$个参数。每个卷积核涉及$k^2$次乘法和$k^2-1$次加法，每层共计执行$k^2\times CH_{in}\times H_{out}\times H_{in}\times W_{in}$次MACC运算。
+
+卷积公式：$$Out(f_0,x,y)=\sum_{f_i=0}^{N_{if}}\sum_{k_x=0}^K\sum_{k_y=0}^KW(f_0,f_i,k_x,k_y)\times In(f_i,x+k_x,y+k_y)$$
+
+``` c++
+for (l=0;l<num_layers;l++){//对每一层
+    for (row=0;row<R;row++){//对输出特征向量的每一行
+        for (col=0;col<C;col++){//对输出特征向量的每一列
+            for (co=0;co<M;co++){//对每个输出特征映射的通道
+                for (ci=0;ci<N;ci++){//对每个输入特征映射的通道
+                    for (i=0;i<k;i++){//卷积核的行数
+                        for (j=0;j<k;j++){//卷积核的列数
+                            Out[co][row][col]+=w[co][ci][i][j]*In[ci][stride*row+i][stride*col+j];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+注：上面的算法应该是错误的，因为没有考虑padding（即$\forall x<0,\forall y<0, In[x][y]=0$）。
+
+padding可以保证在步长为1的时候特征向量尺寸不变。
+
+整个核心算法的计算复杂度为$LRCMNK^2$，当输入的图像增大时，总卷积的计算量也会显著增加。对于任意一个输出特征映射，其值依赖于所有输入特征映射的卷积部分和(每次卷积应用不同的权重矩阵，即算法对每个输入通道应用不同的权重矩阵），对于同一个输入特征映射还可以应用不同的权重矩阵，分别对应不同输出特征映射的部分和。上述的卷积过程可以通过循环变换转换成不同的实现方式和数据、时间和空间局部性特征，也称为数据流模式。所谓数据流模式是指，上述的嵌套循环采用哪种排列方式，每个循环如何进行划分以及如何并行。
+
+上述6层嵌套循环任意交换循环次序都是可以的，分别对应不同的数据访问模式，因而对性能也是有非常大的影响的。A CNN‘s dataflow defines how the loops are ordered, partitioned, and parallelized.
+
+CNN的卷积层主要用于特征提取，$k\times k$的卷积核是由训练确定的，另外，偏置量$b_i$也是由训练决定的。
+
+CNN的卷积核是4维的张量:width, height, input channel, output channel。高于三维的矩阵称为张量。在图像处理中的CNN通常第一层有3个通道，对应RGB三个分量。在第i层，每个filter的channel数与$L_{i-1}$层的filter数相同。卷积核的大小又称为卷积窗。
+
+CNN的主要计算量都来自卷积层，以GoogleNet为例，占到90%左右。而Pooling层和全连接层的计算开销比较小。
+
+
+##困难
+
+
+## ASIC加速方案
+己有的ASIC设计：
+
+1.[spiking-neuron][4]: 主要用于多目标检测与分类，可以以30fps的速度处理400x240的图像，功耗63mW。
+
+2.MIT Eyeriss:
+
+3.DianNao/DaDianNao/ShiDianNao/PuDianNao:
+
+## FPGA加速方案
+###概述
+当前加速CNN的研究主要分为两大类：一是改进精度，二是如何降低开销，其中前者是当前主要的研究热点。
+
+CNN在FPGA上实现时，最好是拓扑规整的，不规整的拓扑结构包括pooling layer、Normalization and LRN layers, 过于复杂的网络拓扑图、核大小不一致的网络。
+
+[HanSong][11]在系统中最耗电的是访存：在45nm CMOS工艺中，32位浮点加法耗电0.9pJ，32位SRAM cache访问5pJ，但是一个32位DRAM（LPDDR2)访问则需要640pJ。因此，优化访存可以极大降低功耗。
+
+对于通常的网络，90%的计算都消耗在卷积层，而90%的存储都消耗在全连接层。因此，压缩卷积层可以节省运行时间，而压缩全连接层则可以节省存储空间。前者上CNN更快，而后者则让CNN更小，二都都使CNN便于在移动设备上进行布置。在CNN中，计算量主要来自前面几个卷积层，因此[Fused][13]方法和很多权重压缩方法都只关注前几层。
+
+###FPGA处理能力模型
+加速器的计算能力和访存带宽要匹配，否则不是高效的结构[Zhang][14]。因此Zhang提出了Roofline Model, 指出在FPGA上实现CNN加速时，处理能力受限于FPGA的计算资源数量以及通信带宽，即实际系统能够达到的处理能力＝$\min\{CTC Ratio\times BandWdith,ComputationRoofline\}$，其中CTC Ratio=Operations per DRAM Traffic, Computation Roofline=total operations/total cycles,即由平台提供的所有的可用的计算资源。后来，xxx对该模型进行了扩展。
+
+在FPGA上实现CNN加速就是要尽可能地并行化所有操作，直到达到硬件资源或者带宽的上限。
+
+
+###己有的加速器方案
+在FPGA己有的CNN加速器方案:
+
+1.AuvizDDN framework
+
+2.基于SDAccel的Multicore Ware
+
+3.Falcon Computing Solution based on OpenCL
+
+
+
+AXI4Lite通常在加速器中用于传输命令，而AXI4用于大量数据传输。
+
+FPGA加速陈列的设计原则：内存统一编址，而且要分块，主控CPU控制所有FPGA协调一致工作，运行runtime lib。通过使用陈列还可能用多个低档FPGA来替换高档FPGA。
+
+###加速器结构上的优化
+在FPGA上实现高效的CNN:
+* 受限于片上RAM的容量，必须想办法提高数组数据的复用率。提高数据局部性和复用率的主要对循环进行变换，loop tiling是循环变换的一种，主要应用于输出特征映射。分块以后循环的层次增加，但是每一层循环的迭代次数减少。
+* 合理组织PE与buffer的互连关系以高效访问数据
+* PE的吞吐率要与片外存储带宽相匹配
+* 任意精度数据类型的使用:基于CNN对权重不是非常敏感的特性，可以用定点数来代替浮点数，甚至可以用二值权重[BinaryNet][18]。动态定点数的表示方法：$(-1)^s\cdot 2^{-f}\cdot \sum_{i=0}^{B-2}2^i\cdot x_i$，其中B表示定点数的总位宽(符号位+整数位＋小数位），$x_i$表示第i位的二进制值，f为分数段的位数。
+* 减少冗余参数：基于CNN对权重不是非常敏感的特性，不仅不敏感，而且还存在大量冗余的参数[Denil][20]。
+* 使用[FFT][19]来加速卷积计算：该方法可以将卷积计算速度提2高倍。
+
+###网络上的优化
+当精度相同时，网络规模越小，硬件开销越小。降低硬件开销的方法主要有：
+* replace $3\times 3$ filters with $1\times 1$ filters.
+* decrease the number of input channels to $3\times 3$ filters
+* downsample late in the network so that convolution layers have large activation map.
+
+
+###算法上的优化
+为了尽可能减少通信的数据量，改进数据的复用性和局部性：（1）使用循环变换，polyhedral-based optimization很重要；（2）使用downsampling的方法。
+
+将乘法的次数减少有可能提高性能，在卷积中，先将输入通道的对应点相加，再与W相乘，乘法减少非常显著，但是这要求所有$CH_{in}$应用同样的权重。
+
+卷积的计算方法：
+* sliding-filter:最直观的方法
+* 矩阵乘
+* FFT
+* Winograd
+
+[Winograd方法][15]:利用Winograd's Minimal Filtering THeory开发的高效的FPGA卷积实现，这种方法对计算资源的需求效小，但是带宽要求很高。
+
+minimal filter理论指出，对于一个r点的FIR滤波器，计算m个输出需要$\mu(F(m,r)=m+r-1$次乘法。
+
+\begin{equation}
+\left[
+  \begin{array}{ccc}
+    d_0 & d_1 & d_2\\
+    d_1 & d_2 & d_3\\
+  \end{array}
+\right]
+\left[
+  \begin{array}{c}
+    g_0\\
+    g_1\\
+    g_2\\
+  \end{array}
+\right]
+=
+\left[
+  \begin{array}{c}
+    m_1+m_2+m_3\\
+    m_2-m_3-m_4
+  \end{array}
+\right]
+\end{equation}
+
+其中$m_1=(d_0-d_2)g_0$, $m_2=(d_1+d_2)\frac{g_0+g_1+g_2}{2}$, $m_4=(d_1-d_3)g_2$, $m_3=(d_2-d_1)\frac{g_0-g_1+g_2}{2}$
+
+上面的例子中，Winograd算法将乘法的次数由6降到4。另外，在计算$m_2,m_3$时，$g_0+g_2$的计算结果可以被复用。上述方法可以通过嵌套扩展到2维的情况，并直接用于cnn的加速计算。[详见][16]。此时，$\mu(F(m\times n,r\times s))=\mu(F(m,r))\times \mu(F(n,s))=(m+r-1)(n+s-1)$，也就是说，minimal filter算法对每个输入需要执行一次乘法。
+
+快速滤波算法可以写为矩阵形式:$$Y=A^T[(Gg)\odot(B^Td)]$$其中$\odot$表示逐元素的乘法。对于$F(2,3)$, 
+\begin{equation}
+B^T
+=
+\left[
+  \begin{array}{cccc}
+   1 & 0 -1 & 0\\
+   0 & 1 & 1 & 0\\
+   0 & -1 & 1 & 0\\
+   0 & 1 & 0 & -1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+G
+=
+\left[
+  \begin{array}{ccc}
+   1 & 0 & 0\\
+   1/2 & 1/2 & 1/2\\
+   1/2 & -1/2 & 1/2\\
+   0 & 0 & 1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+A^T
+=
+\left[
+  \begin{array}{cccc}
+   1 & 1 & 1 & 0\\
+   0 & 1 & -1 & -1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+g
+=
+\left[
+  \begin{array}{ccc}
+   g_0 & g_1 & g_2
+  \end{array}
+\right]^T
+\end{equation}
+\begin{equation}
+d
+=
+\left[
+  \begin{array}{cccc}
+   d_0 & d_1 & d_2 & d_3
+  \end{array}
+\right]^T
+\end{equation}
+
+上面的一维卷积$F(m,r)$可以通过嵌套得到二维卷积$F(m\times m,r\times r)$:$$Y=A^T[[GgG^T]\odot[B^TdB]]A$$其中g是一个$r\times r$的滤波器，$d$是一个$(m+r-1)\times (m+r-1)$的图像块。嵌套的方法还可以扩展到非方陈的形式$F(m\times n,r\times s)$, 即将$F(m,r)$和$F(n,s)$嵌套。$F(m\times m,r\times r)$可以用于计算$r\times r$的卷积，每个通道的图像被分成$(m+r-1)\times (m+r-1)$的图像块，相邻图像块之间有$r-1$个像素的重叠区域。每个通道将所有部分和相加得到该通道的部分和，然后再执行通道间的求和得到最终的输出结果。
+
+对于$F(3\times 3,2\times 2)$, 
+\begin{equation}
+B^T
+=
+\left[
+  \begin{array}{cccc}
+   1 & 0 -1 & 0\\
+   0 & 1 & 1 & 0\\
+   0 & -1 & 1 & 0\\
+   0 & -1 & 0 & 1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+G
+=
+\left[
+  \begin{array}{cc}
+   1 & 0\\
+   1/2 & 1/2\\
+   1/2 & -1/2\\
+   0 & 1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+A^T
+=
+\left[
+  \begin{array}{cccc}
+   1 & 1 & 1 & 0\\
+   0 & 1 & -1 & 0\\
+   0 & 1 & 1 & 1
+  \end{array}
+\right]
+\end{equation}
+
+对于$F(4\times 4,3\times 3)$, 
+\begin{equation}
+B^T
+=
+\left[
+  \begin{array}{cccccc}
+   4 & 0 -5 & 0 & 1 & 0\\
+   0 & -4 & -4 & 1 & 1 & 0\\
+   0 & 4 & -4 & -1 & 1 & 0\\
+   0 & -2 & -1 & 2 & 1 & 0 \\
+   0 & 2 & -1 & -2 & 1 & 0\\
+   0 & 4 & 0 & -5 & 0 & 1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+G
+=
+\left[
+  \begin{array}{ccc}
+   1/4 & 0 & 0\\
+   -1/6 & -1/6 & -1/6\\
+   -1/6 & 1/6 & -1/6\\
+   1/24 & 1/12 & 1/6\\
+   1/24 & -1/12 & 1/6\\
+   0 & 0 & 1
+  \end{array}
+\right]
+\end{equation}
+\begin{equation}
+A^T
+=
+\left[
+  \begin{array}{cccc}
+   1 & 1 & 1 & 1 & 1 & 0\\
+   0 & 1 & -1 & 2 & -2 & 0\\
+   0 & 1 & 1 & 4 & 4 & 0\\
+   0 & 1 & -1 & 8 & -8 & 1
+  \end{array}
+\right]
+\end{equation}
+
+
+###降低IO的方法
+[Micro2016][17]提出Fusion Architecture: 输出特征映射中的每个元素只与输入特征向量的一个很小的区域有关，因此多层之间的相关元素会构成一个金字塔，每个输出特征映射中的一个元素都有一个金字塔，这些金字塔之间相互重叠，因此可以复用数据，避免上一层结果先写回主存，再由下一次读回来的开销。对于VGGNet－E，这种方法可以节省95%的数据传输。
+
+给定输入特征映射数量$N_{if}$，输出特征映射数量$N_{of}$，输入特征尺寸$Size_{in}$, 输出特征映射$Size_{out}$, 核尺寸$S_k$, 可用的片上资源$Size_{chip}$，可以最小化DRAM带宽需求:
+$$\min_{x_0,x_1,x_2}a\frac{x_0}{x_1}+b\frac{x_0}{x_2}+c\frac{1}{x_0}$$
+s.t.
+$$x_0x_1+x_1x_2<Size_{chip}$$
+$$a=\frac{Size_{in}^2}{Size_k^2}N_{of}$$
+$$b=N_{of}\cdot Size_{if}^2$$
+$$c=N_{if}\cdot Size_k^2 \cdot Size_{out}^2 \cdot N_{of}$$
+其中a is the column size of kernel buffer, b is the row size of the input feature buffer, $x_0$ is the column size of the kernel buffer and the row size of input feature buffer, $x_1$ is the row size in kernel buffer, and $x_2$ is the column size of input feature buffer.
+
+每个输入特征映射的元素最多会被读取$k^2\times CH_{out}$次，因此需要被缓存。输入特征映射是只读的，但是输出特征映射则是read-modify_write型的访问，因此缓存所有输出通道当前像素点是非常有必要的。权重是使用非常频繁的数据，最好也全部进行缓存，共计$k^2\times CH_{in}\times CH_{out}$个值。
+
+line buffer最少要缓存$k-1$行,每一行的像素数：image_width x channel_num。
+
+使用片上缓存以后，可以利用burst来指读写的方式与DRAM交互。DRAM的数据最好对齐到4K边界，以方便进行burst操作。进出FPGA的数据尽量使用memcpy，这样可以利用burst来改进IO效率。但是这样要求缓存不能被分块，但是不分块又会在读取时成为瓶颈，因此还通常需要一个由寄存器组成的小缓存区，做为二级buffer。
+
+输出特征映射其实没有必要写回DRAM，因为会成为下一层的输入。但是由于缓存空间不足，通常在实现时都会被写回。
+
+在存储有限的情况下进行网络适配有几种方法:
+* 减少每一层的节点数和层间的连接数，但是这样会导致泛化能力和识别能力下降
+* loop tiling: 处理时间变化
+* 权值共享：保证权值矩陈的大小不变，但是通过共享减少实际的内存占用
+* 降低数据位宽
+
+
+##常见的硬件实现策略
+###用定点数代替浮点数
+
+
+###近似计算
+
+
+###权值压缩方法
+存储权重需要大量的存储空间，VGG-16 32bit权重有560MB。优化手段除了做网络裁剪，就是使用窄位宽数据类型。
+
+在[论文][23]中指出，神经网络中存在大量的冗余参数，不仅浪费存储资源，还会引入很多不必要的计算。能够应用权值压缩的根本原因是CNN对权值并不十分敏感。[论文][23]中甚而指出每一层的权重都可以用其中5%的权重来预测。
+
+权值压缩、共享以及量化的程度都可以用压缩率来衡量.
+
+常见的方法：
+
+#### Deep Compression: 网络剪枝＋权重量化+霍夫曼编码
+
+网络剪枝最初主要用于降低网络复杂度和解决网络过拟合的问题。但是在[韩松][13]的论文中，先按照正常的方法训练网络以得到网络的连接关系，再把权重低于某个阈值的所有连接移除，然后重新训练裁减后的网络，并基于这种前提，为全连接层实现了高效推理引擎[EIE][11].第一次训练网络只是记录权重的重要性但是不学习权重的具体值。而学习连接重要性的想法则是在[之前的论文中提出的][21]. 在[该论文][21]中，韩松指出，传统的网络结构是固定的，训练不会对网络结构进行优化和改进。论文中提出一种三步走的方法来降低网络的存储和计算需求:预训练发现重要权重，然后剪枝，最后重新训练。后面两步可以迭代进行，以对网络进行深度的优化。经过剪枝以后，发现参数数量大大减少，而且主要集中在全连接层，因为全连接层是用高维矩阵向量乘法。剪枝以后不仅可以降低内存和带宽需求，还可以降低网络复杂性、避免过拟合。在剪掉连接以后，对应零输入或者零输出的神经元也可以减掉。另外，剪枝和权重共享是正交的，可以独立使用，也可以同时使用，效果是叠加的。基于聚类的权值共享方法中，矩心的初值会影响聚类的质量，进而影响网络的精度。[韩松][13]使用了三种初始化矩心的方法：Forgy(random), density-based和linear initialization，最终的矩心就是共享的权值。最终的方案中，bias没有被共享和压缩。
+
+假设一个网络有n个连接，每个连接用b位来表示，则总的权重共有nb位。假设最终通过聚类将权重压缩到k个，则每个权重只需要$\log_2(k)$位来存储索引值，因此整个方法的压缩率：$$r=\frac{nb}{n\log_2(k)+kb}$$
+这里没有考虑k个权值的存储开销。
+
+
+#### EIE加速器
+四种用于稀疏矩阵的加速器:Eyeriss,Cnvlutin,Cambricon-X,SCNN
+
+[EIE][11]通过裁减冗余的连接并让多个连接共享同一个权重的方法来降低存储开销和计算量。这里涉及稀疏矩阵向量乘。EIE是一个可扩展的PE陈列。每个PE中存储网络的一部分，共执行相关的计算。PE利用了输入向量的稀疏性、静态权重的稀疏性，相对索引、权重共享和极窄位宽权重矩阵。EIE是学术界第一个用于稀疏权重和权重共享神经网络的硬件加速器，它通过发掘activation的动态稀疏性来减少计算量。之前提出的[SPMV加速器][12]只能发掘静态权重稀疏性。另外，EIE论文中还提出一种方法来分布存储和计算资源以在多个PE之间实现负载均衡和可扩展性。
+
+权重压缩通过剪枝和权值共享来减少空间占用。剪枝会让权重矩阵变成稀疏度为4%-25%的稀疏矩阵，而权值共享则将每个权重用1个4bit的索引来代替，用这个索引来检索共享权值表S(共16个表项)。[韩松][13]的方法通过剪枝＋权值共享+霍夫曼编码的方法可以让权重的存储需求降低49倍以上而不影响性能。对于稀疏矩阵向量乘，计算公式如下：$$b_i=ReLU(\sum_{j\in X_i\cap Y}S[I_{ij}]a_j)$$其中$X_i$表示权重矩阵第i行中不为零的列号的集合，Y表示输入激活向量a中不为零的分量的的行编号集合，因此，X和Y分别表示权重矩阵的静态稀疏度和输入向量的动态稀疏度，也就是说，对于给定的模型，X是固定的，但是Y是随输入变化的。对于给定的输出激活分量$b_i$，只有$X_i\cap Y$中的分量才是需要计算的，因此乘加计算量要比通常的卷积计算要少很多。
+
+在具体实现的过程中，采用compressed sparse column (CSC)格式的一个变种来存储稀疏矩阵：先把权重矩阵的每一行按照PE的数量进行划分，第i行行分配给$i%\|PE\|$，然后，每个PE内部，对于子权重矩阵W的每一列$W_i$，使用一个向量$v_i$来按顺序存储$W_i$中包含的非零权重，此外还需要一个与$v_i$相同长度的向量$z_i$，对于$\forall j$,$z_i[j]$中记录在列向量$W_i$中，$v_i[j]$前面有几个零. $v_i$和$z_i$中的元素都用4bit来表示（为什么$v_i$也要用4bit），因此，如果$z_i[j]$无法表示$v_i[j]$前面零的个数大于15的情况，即溢出。此时需要做特殊处理：如果$v_i[j]$前面零的个数大于15，则在$v_i[j]$的前面增加一个0元素，并在$z_i[j]$前面增加一个元素15，然后再把$W_i$中这个0看成是非零数，以计算$v_i[j+1]$和$z_i[j+1]$。当然，在$v_i$中加入的0元素会引入额外的不必要的计算量。W所有列向量对应的v向量和z向量分别拼接成一个大的向量V和Z。然再引入一个包含M个指针的向量P，其中M＝W的列数+1。对于$i<M$, P[i]指向$v_i[0]$,而且$P[M]$指向V向量最后一个元素的下一个位置。这样，$v_i$包含的元素数量为$P[i+1]-P[i]$。因此在Ｖ中存储的是非零虚拟向量，而非真实的权重。P向量用１６位宽的SRAM进行存储，为了方便一个周期读出$P[i]$和$P[i+1]$，将P存储在两个单端口SRAM中，用$a_i$的i的最低位来选择当前要读的数。relative row index实际就是z向量，这里存储相对索引而不是绝对索引的原因是为了进一步降低存储开销。在矩阵稀疏化以后，索引是相对的，而且在应用了权重共享以后，矩阵元素只用４bit来存储，因此大大节省空间。
+
+EIE只是对全连接层进行了加速，即对稀疏矩阵向量乘进行了加速。[SCNN][25]中提出基于迪卡尔积[Cartesian][26]的压缩权重加速器。在EIE中，CCU负责对所有PE进行控制和监控，并与CPU进行通信，每个PE都有对应的状态寄存器和控制寄存器。CＣU有两种工作模式：ＩＯ模式和计算模式。ＣCＵ中有ＤMA单元，CCＵ需要加载的配置参数包括矩阵尺寸等信息。Sparse　Matrix　Read　Unit用$p_i$读６４位宽的SMSRAM，SMSRAM中存储的是(v,z)元组，其中v,z各占４位，因此一读读操作可以同时读出８个元组，$p_i$的高１３位做为SMSRAM的索引地址，而低３位用于选项待处理的元组。每个周期发送一个元组给Arithmetic Unit,　ＡU执行$b_x=b_x+S[v_x]\times a_j$操作，x用于索引累加器。S码表中存储的是１６位定点数，共有１６个，用４bit便可以寻址。Ａctivation RW Unit存储输入/输出激活向量，当FC级联时，AW队列可以作为下一级的AR，避免IO。另外，AW还做为AU的累加器，累加每个PE计算出的部分和，初值值可以设置为bias向量。AW和AR都是６４个１６位的寄存器堆，因此６４个PE时就可以存储完整的４K激活向量，当$a>4K$时，可以考虑分块进入，也可以把AW/AR变小以减少存储开销。激活向量大约有３０%的稀疏度。
+
+输出激活向量在作为累加器的时候，是放在PE内部还是CCU中？要有一个基地址寄存器，該寄存器的值加上z向量中的值然后取模之后才能做为绝对地址来寻址累加器。ReLU应该放在输出激活向量后面，而不是输入。对于超大的矩阵和向量，可以先加载一部分激活向量、P,SMSRAM, bias都可以只载一部分，但是码表必须一次性全部加载。EIE的乘法单元可以有一套，也可以有８套。
+
+EIE是可扩展的，每个PE存储网络的一部分参数，并执行全部计算，由于连接层是执行矩陈向量乘，因此权重矩阵按行分块，每个分给不同的PE，这样方便每个PE独立计算一个输出结果。每个PE大约存储１３K的压缩权重，相当于压缩前的１.2M. 当PE增加时，SMSRAM数量也相应增加，但是每个SMSRAM的容量需求变小，但是会导致负载更加不均衡。另外，v向量中的zero padding减少，无效的乘法计算也会减少。
+
+每４个PE一组，执行一个本地非零a检测，结果发给一个上级非零检测节点LNZD Node.4个LNZD Node把结果发给上一层LNZD Node。整个非零检测构成一个４叉树，４叉树的根结点在CCU中，负责广播非令a分量。广播采用一个独立的H-tree。CCU从分布的LZND Node接收非零激活向量并将它广播给所有PE。非０检测不会限制时钟频率，因为PE计算乘法会需要很多个周期。ＣＣＵ将$a_i$的值和索引$i$广播给所有的PE，每个PE用这个索引值来检索Ptr向量，找到$Ptr[i]$和$Ptr[i+1]$，然后找到v[i]和v[i+1]的位置，让v[i]的所有值与a_i相乘，当$ptr[i]=ptr[i+1]$时没有乘法，结果存储在对应的部分和累加器中。PE之间的不均衡问题通过长度为８的队列来缓解。当某个PE的队列满时，CCU停止广播新的值以及索引。
+
+EIE潜在支持1x1的卷积和$3\times 3$的winograd卷积，by turning the channel-wised reduction into $M\times V$。
+
+除了剪枝，ReLU操作也会导致卷积神经网络中0值的出现。
+
+EIE对激活向量的非零检测做的不好，可以将非零检测去掉，然后对激活向量也进行压缩编码。
+
+不对激活向量进行压缩的原因是为了和其它的加速器配合。
+
+
+####ＳCNＮ加速器
+涉及0的乘法是没有意义的，因此SCNN通过对权重和输入特征映射的压缩编码来避免与０的乘法。在神经网络中０值的来源:
+* 计算求和时得到
+* ReLU时得到
+* 网络压缩／剪枝时得到
+
+网络中可以剪掉的权重根据不同类型的网络和层的不同，从20%-80%不等。对于典型的数据集，经过ReLU之后的激活向量50%-70%都是０。
+
+传输和计算零值会引入不必要的计算功功耗和开销，因此SCＮN中始终保持数据是压缩格式的。
+
+SCNN关注于卷积层的加速，是第一个面向稀疏矩阵压缩的加速器。当应用于全连接层的计算时效率不高。
+
+与EIE一样，SCNN也同时发掘了权重和特征映射的稀疏性。不同之处在于，EIE只对权重矩阵做了稀疏压缩编码，激活向量是以非零的方式存储和处理，只是最终CCU只广播非零的激活向量。而其它几种稀疏压缩方法则只部分发掘了权重或者特征映射中的稀疏性。Eyeriss通过在DRAM中存储压缩的特征映射来开发特征映射中存在的稀疏性，同时特征映射中的０值将被在传输和计算时被忽略。但是由于Eyeriss是应用在非剪枝网络上的，因此权重上的稀疏性不是非常显著，因此没有对于进行gating处理，而且即使做了gating也只是节省了功耗但是没有节省计算时间，而SCNN既节省了功耗又节省了时间；另外，eyeriss在DRAM之间传输数据时使用压缩格式，但是在计算时数据会被解压，因此不如SCNN这样节省功耗。Cnvlutin在Relu操作之后对特征映射进行压缩，而Cnvlutin更加激进，在数据移动和缓存时都使用压缩格式并跳过０值计算以改进能量效率和性能。当特征映射为０时，两种结构都会避免对权重的加载和访问。Cambricon-X只开发了权重稀疏性，对于特征映射中的０还是会引起计算开销。三种方法的本质区别在于最内层循环所发掘的空间、时间局部性的方法，即数据流模式(即嵌套循环采用哪种排列方式，每个循环如何进行划分以及如何并行。）：eyeriss使用row-stationary数据流，将权重矩阵和特征映射广播给每个PE，PE内执行０值检测。Cnvlutin用一个非０的特征映射与所有需要相乘的权重矩阵相乘，然后再以输入通道进行求和。Cambricon-X基于非０权重向量来在不同的输入通道中取激活向量，然后计算其点积，因此当特征映射中有０时会引入额外的计算开销。
+
+SCNN采用的数据流称为PlanarTiled-InputStationary-CartesianProduct-Sparse，即PT-IS-CP-sparse。它可以充分利用权重矩阵和特征映射的稀疏性。IS描述该数据流的时间组成，即输入特征映射保持不变，让它与所有需要相乘的权重矩阵进行运算，这样可以最大化输入特征映射的复用，因此完整循环的最内层是$CH_{out}\to W\to H$。因此每个输入特征映射的点会为$CH_{out}$个输出特征映射贡献部分和。因为ＩS完全没有利用权重的时间局部性和空间局部性，为此可以考对$CH_{OUT}$维度进行分块。因此，数据流变成$CH_{out}/K_c\to CH_{in}\to W_{in}\to H_{in}\to K_c \to W_{out}\to H_{out}$。CP指的是迪卡尔积，每个PE中有一个CP阵列接受F个非零权重输入和I个非零特征映射输入。这里充分开发了权重矩阵的局部性，因为每个取办的权重值会与所有取出的输入特征映射进行乘法，而且所得的两两相乘的结果最终都是有意义的。PE同时跟踪每个乘积的坐标值(与乘法并行执行），通常一个crossbar将值和坐标送入对应的累加器。累加器阵列至少要配置$F\times I$个加法器以匹配乘法阵列的吞吐率。为了避免冲突，bank的数量设置为$2F\times I$,每个bank还包括一个加法器和若干个输出特征映射的表项。累加器的buffer是double-buffered，这样一部分buffer可以用于更新累加值，而另一部分buffer则用于为PPU提供输入。PlannarTiled是指对循环的$W_{in}$和$H_{in}$进行分块，以发掘输入特征映射的空间局部性，分块以后，每个PE处理其中一块，即$CH_{in}\times W_{in}/W_c\times H_{in}/H_c$。权重阵列会在PE之间进行广播，每个PE处理自己的那一部分输入特征映射，得到的输出特征映射在尺寸和维度上是$CH_{out}\times W_{in}/W_c\times H_{in}/H_c$,但是在不同的PE之间会有一定的重叠（即data halos）。解决的办法有两个：在划分输入特征映射时，让相邻的PE之间有一部分重叠区域；或者PE将halos部分的部分和数据传输给相邻的PE。二者的差异很小，在SCNN中采用的是后者，即output halos。
+
+压缩的权重矩阵按照输出通道进行分组，$K_c\times R\times S$个权重压缩成一个block。类似的，输入特征映射按照输入通道进行分组，$W_t\times H_t$压缩成一个block。每次执行乘法时从权重buffer($K_c\times R\times S$）中取出F个非零值，再从输入buffer($W_t\times H_t$)中取出I个非零值。另外，weigth buffer和input buffer中压缩的坐标值也被会取出执行坐标计算，最终的坐标用于访问累加器。累加结果是以非压缩的方式存储的，因此累加结果在经过ReLU之前为零的可能性较低。累加器阵列分散在不同的PE当中，每个PE中存储$K_c\times W_{t}\times H_t$个累加和，每个PE内部的累加器阵列进一步分成若干个bank，乘法阵列的结果根据地址经过crossbar送入不同的bank，再根据地址累加到正确的部分和上。当每一组输出通道完成计算以后，累加器的结果排空并压缩后存入输出buffer。
+
+在SCNN中，多个PE并行工作，每个PE负责输入特征映射的一部分３D区域，通常有６４个PE。每个PE有一个乘法器阵列，通常是$4\times 4$，阵列接受非零权重和特征映射作为输入并输出所有输入组合的乘法结果，即执行迪卡尔积乘法。为了减少数据访问开销，所有特征映射以input stationary的方式一一系列权重相乘。每个PE包含接收权重和输入特征映射的通道，以及输出特征映射的通道，另外，相邻PE之间还包括交换halos的通道。另外，SCNN还包括一个layer sequencer用于编排权重和特征映射在芯片和DRAM之间的移动，每一层都对应一系列用于配置layer sequencer的参数。每个PE包含一个用于控制本地计算的状态机。每个PE包含一个weight buffer, input activation RAM, output activation RAM,一个乘法器，一个crossbar, 一个累加器bank以及一个后处理单元(PPU)，ＰPＵ主要完成以下三种工作：１。在相邻PE之间交换halos值；　２。应用ReLU，pooling, dropout等功能；３。压缩输出特征映射并将结果写入output activation buffer.　
+
+压缩仍然使用CSC的变种，但是与EIE有所不同。在压缩时权重时，权重矩阵先根据输出通道进行分组，在每一组内，把所有权重矩阵按行展平为一维后拼接在一起构成非稀疏的权重序列，然后用两个向量v和z来进行压缩表示。其中v中存储稀疏矩阵的非零值，z[0]中存储v中非零值的个数，z[i]用于存储v[i]后面有几个零。对输入特征映射，按照$H_t\times W_t\times Ch_{in}$分块以后，按$CH_{in}\to H_t\to W_t$的顺序进行序列化，然后应用同样的压缩方法。权重和激活向量的索引值都是４bit，因此也会有zero-padding的情况出现。输出坐标可以用(零的个数+非零个数)/维度的方法得到，因此维度最好是２的整数次幂。
+
+对于超大规模的网络卷积层，SCNN也会进行分批处理，每个PE一次操作一部分特征映射。这种方法会导致重复加载一部分输入特征映射，因此作者建议在设计网络中尽量不要使用较大的卷积层。
+
+PE之间的barrier以及PE内部的乘法阵列都会导致性能的下降。
+
+权重用１６个数表示可以理解?激活向量为什么可以？
+
+SCNN的一个好处是与卷积核大小无关，可以适应任意大小的卷积核。
+
+
+###量化
+[Quantization][6]该方法和很多之前的神经网络压缩方法一样，基本只对全连接层有效，主要是对密集权重矩阵进行量化编码来实现压缩。
+
+####SVD矩阵分解
+全连接层的权重矩阵记作$W\in R^{m×n}$ ,首先对W进行奇异值分解(Singular Value Decomposition, SVD），如下：$$W=USV^T$$其中U,V是两个正交矩阵，S为对角矩阵。
+
+为了能够用两个较小的矩阵来近似W，我们可以取U和V的前k个奇异向量以及对应的对角矩阵的分量。于是，W可以通过下式重建：$$\bar{W}=\bar{U}\bar{S}\bar{T}^T$$,其中$\bar{U}\in R^{m\times k}$, $\bar{V}\in R^{n\times k}$
+
+SVD分解的近似程度由S的特征值来控制。基于奇异值分解的模型压缩方法会损失精度。
+
+我们唯一需要保存的就是3个比较小的矩阵 U,S,V ,我们可以简单算一下压缩比为 mn/k(m+n+1).
+
+####向量量化方法
+#####二值化
+
+这种量化方法的想法来自于Dropconnect,量化如下：$$\bar{W}=(W_{i,j}\geq 0)?1:-1$$
+假设原来的 W 是 float 型数据，则压缩比为 32
+
+
+#####　K-Mmeans标量量化
+首先把 $W\in R^{m\times n}$整成标量 $w\in R^{1\times mn}$，然后进行K均值，于是每一个 $W_{i,j}$ 都可以用距离其最近的聚类中心表示，于是我们需要存储的只有 $m\times n$个索引，以及 K 个聚类中心。
+
+#####乘积量化
+乘积量化就是把原始数据划分成若干个子空间，在每个子空间中分别进行K-Means。
+
+比如原来的 W 是 $m\times n$ 维的，我们可以把列(or 行)分成S份，即 W=[W1，…WS] ,然后对每一个 Ws 进行K-Means。codebook的开销是可以乎略的，压缩率为$(32mn)/(32kn+log_2(k)ms)$
+
+#####残差量化
+残差量化可以看做是一种分层量化、迭代量化。
+
+首先对原始的 W 使用K-Means的，然后用聚类中心对其进行表示 $W_{c1}$ ，然后计算残差 $\bar{W}=W−W_{c1}$。对 $\bar{W}$ 继续K-means，重复上述过程。于是， Wi 可以表示为多级聚类中心之和：$$W_i=c^1_j+c^2_j+…+c^t_j$$
+这种方法的压缩率为$m/(tk+log_2(k)tn)$
+
+#####权值hash
+除了[韩松][21]提出阈值法以外，还有[论文][22][韩松][13]中提出的聚类法，将相近权重值进行聚类并用矩心来代替。但是两种方法都需要对网络进行再次训练以修改权重值。访问共享权重的方法也主要有两类:一类是[论文][22]中提出的hash方法，另一类是[韩松][21]用到的索引法。
+
+在[论文][22]中，用hash的方法来降低模型尺寸，即权重的多少，落入同一个桶的所有连接共享同一个权重值，该方法对预测精度影响较小，在一个全连接网络中，在层l和层l+1之间有$n^{l+1}(n^l+1)$个加权连接，每个连接对应一个自由参数，即权重矩阵中的一个元素。在[论文][22]中权值共享的实现方式：在$k\times k$的矩阵中，只允许有$k$ (k<K)个权值，这k个权值保存在一维数组或二维数组中，称为virtual matrix/vector，然后以下标i,j为参数调用hash函数得到virtual matrix/vector的下标进而读取权重。在[论文][22]中使用reLU来实现非线性化,ReLU的若干好处可以参考[论文][24]。
+
+
+####总结
+k-means只捕捉神经元之间的冗余，乘积量化发掘了一部分结构上的局部的冗余信息，而残差量化则发掘了全局结构上的冗余信息。己经有很多基于学习的二值化或者乘积量化方法，例如[Spectral Hashing][7], [Iterative Quantization][8], [Catesian kmeans][9]等。
+
+
+#CPU/GPU的实现方法
+OpenCL是数据级并行模型，编程核心是如何荣划分数据。OpenCL的host-device模型在异构计算领域非常有代表性，借此可以理解OpenCL的API设计原则：每个device有多个计算单元组成，每个计算单元又由多个处理部件组成；内存被划分为主机内存和设备内存。
+
+CUDA编程模型：SIMT: SIMD + Multithreading。同一个block的线程组成一个wrap，每个wrap共享同一个PC,通常切换wraps来隐藏延迟。
+
+
+#其它
+##Caffe模型
+*.prototxt: 设置网络拓扑、层设置、训练协议等
+
+*.caffemodel: 存储权重
+
+##其它
+ceiling division: ceil_div(x,y)=$\frac{x+y-1}{y}$
+
+ZynqNet在SqueezeNet的基础上进行了效率优化，FPGA相关的优化和识别精度相关的优化。在Zynqnet中，$k=3$，但是每个输入通道都缓存了4行，每行256个像素，每个像素32bit，每个通道共32768bit，最大通道数量为736。softmax操作是在arm核上完成的。ZynqFPGA有2180KB block RAM，可以容纳56万个浮点数。
+
+line buffer的需求:736x8x4x4=92kB，但是论文中说是133KB
+
+weight buffer的需求:736x512x4=1.43MB，但是论文中说是1.7MB
+
+ZynqNet的代码中，重复的代码很多，会对最终产生的RTL产生影响，例如network.cpp/reset()函数。另外，数据和weight都是先从文件读入内存中，再拷贝到CPU与FPGA共享的SDRAM buffer中，然后再读入FPGA，这样做是否冗余。
+
+ZynqNet每一层的输入输出特征映射以及权重只进出FPGA一次，己无优化的空间。但是层间还可以复用数据并优化IO时间。每个fire的expand1x1和expand3x3是可以共享输入特征映射的，另外expand1x1对资源的需求非常小，可以与expand3x3层合并以减少外存IO。另外，在现有的方案中，expand1x1的计算量非常小，因此整个网络非常不容易流水化/数据流化。ImageCache的实现不好，并发访问受限，可以考虑分为多个bank。另外，macc2d函数在执行1x1卷积时load和计算的效率都比较低。
+
+在Cifar代码中，mem_addr_t为什么是40位？MAX_MULTI_TIMES为什么是256？BatchNormal是什么意思?sublayer是什么? apfixsync是什么？
+
+降低位宽与权值共享应该是可以一起使用的。
+
+深度压缩之蒸馏模型：迁移学习的一种形式，蒸馏与提取并无二意。
+
+[Netscope CNN Analyzer][2]: 一种可视化的分析和编辑CNN拓扑的工具,它是基于对[Netscope][1]的修改得到的。
+
+ZynqNet是一种CNN拓扑结构，在GPU上训练，在FPGA上执行推理。
+
+
+#参考文献
+[1]: https://github.com/ethereon/netscope 
+[2]: http://dgschwend.github.io/netscope/
+[3]: http://neuralnetworksanddeeplearning.com/
+[4]: A million spiking-neuron integrated circuit with a scalable communication network and interface
+[5]: Exploiting Linear Structure Within Convolutional Networks for Efficient Evaluation
+[6]: Compressing deep convolutional networks using vector quantization
+[7]: http://blog.csdn.net/zwwkity/article/details/8568994
+[8]: http://blog.csdn.net/xiaoshengforever/article/details/20719485
+[9]: http://blog.csdn.net/together_cz/article/details/70492897
+[10]: http://blog.csdn.net/zouxy09/article/details/24971995
+[11]: EIE: Efficient Inference Engine on Deep Compressed Neural Network
+[12]: A Scalable Sparse Matrix-vector Multiplication Kernel for Energy-efficient Sparse-blas on FPGAs
+[13]: DEEP COMPRESSION--COMPRESSING DEEP NEURAL NETWORKS WITH PRUNING, TRAINED QUANTIZATION AND HUFFMAN CODING
+[14]: Optimizing FPGA-based Accelerator Design for Deep Convolutional Neural Network
+[15]: Exploring Heterougenous Algorithms for Accelerating Deep Convolutional Neural Networks on FPGA
+[16]: Arithmetic Complexity of Computation
+[17]: Fused Layer CNN Accelerators
+[18]: BinaryNet--Training Deep Neural Networks with Weights and Activations Constrained to +1 or −1
+[19]: Fast Training of Convolutional Networks through FFT
+[20]: Predicting Parameters in Deep Learning
+[21]: learning both weights and connections for efficient neural network
+[22]: Compressing Neural Networks with the Hashing Tricks
+[23]:  predicting parameters in deep learnings
+[24]: Deep Sparse Rectifier Neural Networks
+[26]: https://en.wikipedia.org/wiki/Cartesian_product

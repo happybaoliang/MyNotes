@@ -1,0 +1,608 @@
+# HLS的基本概念
+
+基于HLS的设计流程：
+1. 编译运行C代码，验证功能的正确性
+2. 利用HLS生成RTL实现
+3. 综合RTL生成分析报告
+4. 打包得到的IP核，供IP Integrator，DSP Builder或Zynq使用。
+
+
+HLS将类C代码(C/C++/OpenCL/Systemc)的函数转换为HDL语言的模块。整个转换过程分为三个主要的步骤:
+1. 调度:确定每个时钟或状态执行哪些操作，这里的状态与FSM中的状态紧密相关，但是也不完全一一对应。
+2. 操作绑定:确定每个操作用哪些硬件来执行
+3. 控制逻辑提取:提取控制逻辑，生成FSM
+
+# HLS提供的库支持
+HLS提供了以下扩展的lib库：
+* 任意精度整数库: ap_cint.h (C), ap_int.h (C++), systemc.h (systemc)
+* 任意精度定点数库: ap_fixed.h (C++)
+
+#HLS的问题
+HLS的优化还不够好，下面的代码需要1个周期:
+```c++
+if(a=MAX-1) a=0;
+else a=a+1;
+```
+而下面的代码则需要2个周期：
+```c++
+a++;
+if(a=MAX) a=0;
+```
+
+# HLS的语法
+
+C函数到RTL的转换关系:
+
+* 函数参数－>IO端口
+* 函数体－>模块，严格一一对应
+* 循环默认不被展开
+* 数组－>默认为block RAM或ultraRAM，也可以设置为FIFO, Register或分布式block RAM。当综合为block RAM时，HLS自动生成片选信号、地址端口和数据端口。
+
+Clock Uncertainty: 默认为时钟周期的12.5%。Vivado综合估计的时钟周期Tv应当小于T_target-T_uncertainty。
+
+综合报告里的performance metric:
+
+* Area: 需要的LUT, Register, block RAM, DSP48
+* Latency: 生成所有输出值所需要的周期数
+* Initiation Interval: 函数接受新的输入值所需要的周期数，即启动间隔
+* Loop Iteration Latency: 一次循环迭代所需要的周期数
+* Loop Initiation Interval: 两次迭代需要间隔的周期数
+* Loop Latency: 整个循环所需要的周期数
+
+在HLS综合时需要指定一个顶层函数，一个工程最多只能有一个顶层函数，该函数的各级子函数都将被综合为RTL代码。top_level_function的返回值不能是指针。注意：main()是不能被综合，它是整个testbench的核心部分。所谓testbench即为顶层函数及其各级子函数之外的所有代码，这些代码用于验证整个设计的正确性。而验证是否通过是根据main()函数的返回值来决定的：0表示测试通过，其它值表示测试不通过。不论RTL的仿真结果是否与预期的结果一致，只要main()函数返回零就认为验证通过。这样的设计也是有原因的。列出一个testbench的示例。
+
+HLS的使用约束：
+
+* 不能综合包含系统调用的代码
+* 不能综合使用动态内存管理API (malloc/free等)的代码
+* 对于C++动态创建对象的代码也要改
+* 不支持函数指针
+* 不支持递归函数
+* 不支持C++ STL综合，但是std::complex是可以综合的
+* testbench不支持交互式输入，只有被标记为testbench的文件才能用于仿真
+
+HLS在综合前会定义__SYNTHESIS__宏，因此，可以用这个宏将不可综合的代码排除在外。
+
+指针数组是可综合的，只要每个指针指向一个标量或者标量数组
+
+HLS提供了扩展的C代码库。
+
+对于opencl综合，HLS只能为整个work group综合代码。Vivado groups all interfaces in OpenCL API as follows:
+
+1.all scalar interface and the block level interface into a single AXI-4-lite interface.
+
+2.all array and pointers into a single AXI4 interface.
+
+3.No other interface specifications are allowed for opencl API kernel.
+
+任意精度的整数库:
+C: ap_cint.h
+C++: ap_int.h
+systemc: systemc.h
+
+任意精度的定点数据类型：ap_fixed.h (C++独有，用类来表示数据类型)
+
+quantization mode: round to $+\infty$
+
+overflow mode: wrap around
+
+定点数据类型比浮点数据类型更节省资源及时钟周期数。
+
+HLS也提供了半精度浮点数float16 (hls_half.h)，支持加减乘除。
+
+联合体可以用于基本数据类型之间的转换，类类型之间的转换需要使用static_cast. hls/utils/x_hls_utils.h中的fp_struct<half>也可以用于halfo类型到其他类型的转换。
+
+接口综合(interface synthesis)：函数参数/返回值到IO端口的转换过程。vivado会创建三种类型的接口：
+
+1.时钟和复位信号:当模块的操作需要多个时钟周期才能完成时，会生成ap_clk和ap_rst。
+
+2.块级(函数级)接口协议：主要用于函数的返回值，块级接口协议有三种类型:ap_ctrl_none, ap_ctrl_hs, ap_ctrl_chain。ap_ctrl_hs是默认协议(双向握手协议），它包含四个控制信号线：ap_start, ap_done, ap_ready, ap_idle。ap_ctrl_chain在ap_ctrl_hs的基础上增加了ap_countinue信号（用于反压，给读取本模块输入的模块使用)，便于实现模块的级联.ap_ctrl_none不实现任何IO协议。另外s_axilite也是块级接口协议。输入数据由HLS在调度阶段决定在哪个时钟周期被读取，当所有的输入都被读取之后，ap_ready信号有效。
+
+3.端口级接口协议:每个参数和返回值生成一组端口(非top level function的参数可能不需要，因为有可能被不inline）。
+
+当块级接口协议指示开始执行操作时，端口级协议开始读入和写出数据。默认情况下，传值输入参数和指针输入参数会被转换为wire port(无握手信号，只有一个数据端口)。此时需要输入数据在被读取前一直有效，而输出指针信号会带有一个数据有效信号。即会读取又会被写入的函数参数在转换时会被分成两个独立的输入和输出端口。即使函数没有返回值，块级接口协议也会包含一个returnu端口，return端口的有效信号是ap_done。如果函数返回值还指定了AXI4_lite接口(s_axilite)，那么all the ports in the block-level interface are grouped into the axi4-lite interface.
+
+端口级接口协议分为以下三种类型:
+
+a. AXI接口协议：只能用于top level function的参数。
+
+(1). AXI4 Stream Interface (axis): 只能用于输入参数或者输出参数，不能用于双向参数，该协议总是将数据符号扩展到下一个byte (例如12->16, 7->8)。
+
+(2).AXI4 Lite Interface (s_axilite):可以用于数组以外的任意端口，可以将多个参数打包为同一个AXI4 Lite Interface.
+
+(3). AXI4 Master Interface (m_axi): 只能用于指针、数组以及C++的引用。可以将多个参数打包为同一个axi4 interface.
+
+b. NO IO Protocol: 只生成数据端口，无控制信号：
+
+(1).ap_none: 标量输入(传值、传引用或者传指针)的默认模式，输入与输出端口均无控制信号。
+
+(2).ap_stable: 配置输入端口，只会在重启时发生变化的信号，这些输入的stable数据又无法被编译综合优化掉。
+
+c.握手协议：
+
+(1). ap_hs: 包含有效和确认两种控制信号，可以用于顺序读写的数组
+
+(2). ap_vld: 只有有效信号
+
+(3). ap_ack:只有确认信号
+
+(4). ap_ovld: 面向传引用或者传指针类型的参数（通常是in-out类型的函数参数)，对于读写型指针参数，这是默认选项。in-out参数被拆开后，ap_none用于输入，ap_vld用于输出，对于普通端口，ap_none用于输入，ap_vld用于输出。
+
+d. memory interface:
+
+(1).数组参数默认用ap_memory来实现，HLS自己可以确定实现单端口或多端口RAM。也可以用RESOURCE原语来指定存储器类型。如果HLS发现人为指定的双端口不会有收益，HLS也会自动转换为单端口。
+
+(2). bram: 在功能上与ap_memory相同，但是实现不同。
+
+(3). ap_fifo: 可用于顺序访问的数组参数。要么只读，要么只写，因为只能按顺序访问，不能随机读取。
+
+(4). ap_bus:用于与总线桥通信，总线桥必须能缓存所有的burst write。
+
+数组类型的函数参数通常会被实现为ap_memory或者ap_fifo。
+
+函数的结构体参数会被分解为多个端口，每个端口对应一个成员，当不使用interface原语时，每个成员都会生成一个端口。
+
+函数的结构体数组参数会被分解为多个数组，每个成员对应一个数组，并最终综合成一个端口。
+
+DATA_PACK原语用于将结构体所有成员打包在一起，便利可以同时读取所有的成员。由DATA_PACK创建的总线或者端口宽度最大为8192bit.
+
+HLS可以自动确定循环展开的次数，也可以手工指定。
+
+byte_pad选项用于将结构体成员对齐到字节边界:分为structure level字节对齐和field level字节对齐两类。对于field level byte padding,如果结构体有数组成员，则数组的每个元素都会被对齐。
+
+结构体的数组成员可以用ARRAY_PARTITION和ARRAY_RESHAPE原语进行优化。但是二者与DATA_PACK原语不可以同时使用。
+
+被多次访问的指针参数可能会导致不可预知的问题，替代方案是用volatile修饰或者使用hls_stream类。
+
+如果指定了register参数，则所有传值输入参数都会在第一个时钟周期被读取。对于输出，该参数保证值被锁存。对于FIFO, memory和AXI4接口无效。
+
+systemc的接口原语:
+
+AXI4接口的使用：
+
+为了保证不产生组合逻辑回路，AXI4 Stream接口默认都带有register锁存:
+
+* Forward: 只锁存TDATA和TVALID信号
+
+* Reverse: 只锁存TREADY信号
+
+* Both: 默认，锁存TDATA, TVALID和TREADY
+
+* Off: 均不锁存
+
+RTL的reset端口的行为由config_rtl来控制。
+
+FSM编码默认为oneshot, 另外还有auto, binary和gray可选。
+
+#HLS的优化原语
+1.ALLOCATION:设定硬件资源的用量限制
+
+2.ARRAY_MAP: 将多个小数组合并，以减少block RAM的用量及端口数量
+
+ARRAY_MAP支持两种类型的数组合并：
+
+a.水平合并：数组之间首尾相接，offset选项用于在数组之间插入空隙
+
+b.垂直合并：数组以元素为单位进行拼接
+
+3.ARRAY_PARTITION:将大数组分为小数组或者寄存器，相当于增加端口数量，可以消除block RAM瓶颈。
+
+ARRAY_PARTITION有三种模式:
+
+a.block:
+
+b.cyclic:
+
+block和cyclic都用factor选项指定子数组的个数。当原数组长度不能被factor整除时，最后一个子数组的元素较少。
+
+c.complete:用寄存器代替RAM
+
+throughput_driven选项可以让HLS自动进行数组划分。
+
+另外，dimension选项可以用于划分多维数组时指定划分的维度，0代表所有的维度。
+
+4.ARRAY_RESHAPE:让数组位宽增加，以减少深度，并增加单个周期内可以读出的数据量。
+
+5.DATA_PACK:
+
+6.DATAFLOW:使能任务级(函数或循环）流水线并行，会在循环或者子函数调用之间创建用于缓存数据的channel（double-buffer/pingpong RAMs or FIFO).这样可以让数据尽可能快地在模块间进行交换,而不必等前面的任务全部完成之后后面的任务才开始执行。这样可以提高吞吐率、降低延迟。
+
+为了减少RAM的用量，可以考虑用dataflow优化，用小的fifo来代替大的RAM。
+
+DATAFLOW不会应用到下层的子任务。
+
+channel的实现方法:
+
+a.对于标量、指针、引用以及函数返回值，用FIFO实现。对于标量值，fifo深度为1，该深度可以用fifo_depth选项进行修改。
+
+b.对于顺序访问(由HLS分析确定)的数组参数，用FIFO实现。
+
+c.对于乱序访问或者HLS无法判断是否为顺序访问的情况，用ping-pong buffer实现。
+
+以下情况会阻止HLS执行DATAFLOW优化：
+
+a.single producer consumer violations
+
+b.bypass tasks
+
+c.feedback between tasks
+
+d.conditional execuation of tasks
+
+e.loop with multiple exit conditions
+
+7.DEPENDENCE:提供关于循环信赖的额外信息（主要用于指出伪依赖)，以尽可能实现并行化操作。
+
+循环数据依赖包括inter和intra两类，循环依赖都是数据依赖。
+
+8.EXPRESSION_BALANCE:重新安排运算符以形成一个平衡的计算树，这样可以减少延迟。但是需要更多的硬件资源。对于整数运行，该功能默认是打开的。而对float和double，默认是关闭的。因为对于float和double有saturation和rounding的问题，改变运算次序可能会改变计算结果，进而使得C/RTL协同访问结果与C仿真的结果产生差异。因此，涉及double和float的循环通常不被展开。
+
+no_signed_zero优化确保下面的表达式在使用float和double时是成立的：
+
+x-0.0=x;
+
+x+0.0=x;
+
+0.0-x=-x;
+
+x*0.0=0.0
+
+否则，由于rounding的原因，上面的式子可能不成立。
+
+9.INLINE: 使能函数边界的逻辑优化，消除函数间的握手开销。小函数会被自动内联，也可以使用INLINE的off选项来禁止内联该函数。INLINE原语的recursive选项可以让所有子函数都被inline.
+
+10.INTERFACE: 用于指定函数级接口协议(用于函数返回值)和端口级接口协议(用于函数参数)。
+
+11.LATENCY:对一个特定的代码段(函数或者一次循环迭代）设置一个最大或最小的延迟
+
+12.LOOP_FLATTEN:将多重循环压缩为单重循环以优化延迟。对于多重循环，存在循环开销（需要1 cycle进入子循环，1 cycle退出子循环，分别用于进入和退出循环时的下标检查）。因此，应用了loop flatten以后可以优化循环的延迟。
+
+LOOP_FLATTEN优化仅能用于以下情况：
+
+a.完美嵌套循环：只能最内层循环有循环体代码，且所有的循环上界均为常数。
+
+b.半完美嵌套循环：只有最内层循环有循环体代码，最外层循环上界是变量，其他循环上界为常量。
+
+13.LOOP_MERGE:合并相邻的循环以改进延迟、优化逻辑。每个未展开的循环都至少对应一个FSM状态。FSM状态的转移会消耗一个周期，因此loop merge可以用来降低延迟。不仅如此，合并后的循环还可以应用更多的优化。
+
+循环合并的限制：
+
+a.当循环上界是变量时，这些值必须相同
+
+b.当循环上界是常量时，合并后的循环上界取最大的常量
+
+c.不能合并变量和常是上界的循环
+
+d.访问FIFO的循环不能合并，否则会改变FIFO的读写顺序
+
+e.两个待合并的循环之间的代码不能有side effect，多次执行要产生相同的结果。
+
+14.PIPELINE: 与DATAFLOW的区别是？默认启动间隔(II)为1。当对一个函数或者循环使用PIPELINE原语以后，其嵌套的子循环都会被自动展开。而所有的子函数也必须被流水化。如果下层有函数或循环不能被展开，则会阻止流水化。
+
+PIPLELINE优化以后的代码只有一个硬件单元，而UNROLL后的代码则有N个执行单元。
+
+将可变循环上界循环转化为固定循环上界+条件判断可以让循环展开/优化。
+
+for(i=0;i<variable;i++) 
+
+to
+
+for (i=0;i<const;i++)
+    if (i<variable) do-something
+
+函数流水会一直运行，永不停歇。而循环流水会在循环结束之后停止运行。函数流水会不停地读输入、写输出，而循环流水会在循环结束后引入空泡。
+
+函数的顶层循环或者用DATAFLOW优化的区域，可以在应用PIPELINE时使用rewind选项，以让循环在结束之后立即重新执行，不引入空泡.flush选项只能用于函数流水线。可以用pipeline_loop来设置循环流水线的上限，所以低于该值的循环会自动流水化。该值默认为0，即不进行流水线优化。
+
+当流水化嵌套循环时，为到达性能与面积的折衷，最有效的办法是流水化最内层的循环。如果流水化外层循环，则所有的内层循环都会被展开，因此功耗和面积开销极大。特别是涉及ram访问时，展开内层循环也无法同时读取。当然，展开内层循环级别越高，性能越好。当内层循环被流水化时，外层循环也会被flatten以降低延迟。不完美循环（比如两层outer loop之间有代友)会阻止flatten.最终降低性能，可以用循环变换来解决。
+
+15.PROTOCOL:
+
+16.RESET:
+
+17.RESOURCE: 指定哪种操作用什么硬件单元来实现，也可以用于指定数组用哪种存储结构(RAM，ROM，FIFO）或者实现方案(Block RAM, Distributed RAM, Shift Register)来实现。RESOURCE原语的latency选项可以指定流水线的段数，如果不指定，HLS会根据延迟约束自行确定。
+
+18.STREAM: 数据传输的一种类型，不需要地址管理。指定在做数据流优化时，特定数组是由FIFO还是RAM来实现。
+
+19.TOP
+
+20.UNROLL: 只有当一个循环的不同迭代之间没有信赖关系，而且循环上界是编译常量时才会对循环进行展开。循环展开除了可以让不同的循环迭代并行执行以外，还可以消除每轮迭代进入和退出循环的额外时钟开销(进入和退出循环各需要1个cycle)。
+
+UNROLL原语也可以用于函数，会展开函数内的所有循环。
+
+完全展开的循环会使用大量的硬件逻辑，因此也可以使用factor选项进行部分展开，factor不必整除迭代次数。
+
+避免使用全局变量做循环索引，避免使用可变循环上界，这两种情况都无法令HLS估计循环延迟及性能，也无法应用循环展开、流水化等手段。
+
+LOOP_TRIPCOUNT原语用于为循环设置上界、平均值和下界，它对综合结果没有影响，只会影响综合报告，以便于对比综合结果。要想对综合结果产生影响，需要使用assert断言语句。
+
+在C++中，当循环索引变量为类成员时，无法应用循环展开。
+
+21.FUNCTION_INSTANTIATE: 与INLINE类似，也会在每个函数被调用的地方将函数复制一份，并针对每一个实例对函数的硬件实现进行优化，消除不必要的逻辑。但是这种优化会保留函数调用的层次结构。
+
+HLS中不支持全局指针，因此无法对主存进行抽象描述。
+
+HLS只支持本地数据类型(如int,float,char)之间的类型转换，不支持自定义数据类型（包括typedef和struct)之间的类型转换。
+
+数组的三种实现方式:
+
+1.block RAM: 默认
+
+2.register: 完全划分
+
+3.fifo: 用STREAM原语设置为stream或者自动设置为stream的情况:
+
+a.top level function的数组参数设置了ap_fifo, axis或者ap_hs
+
+b.应用了dataflow优化的代码区域
+
+在tcl命令行输入list_core可以列出库中可用的所有IP核。
+
+当需要综合多个函数时，打包成一个top level function.顶层函数不能是静态函数。综合之后，每个函数对应一个verilog文件。
+
+娄组在RTL reset时的行为要特别注意。
+
+只有读取需求的数组最好设置为ROM。
+
+top level function的数组参数会被综合为访问外部存储器的端口。
+
+可以用以下方法来重新配置数组参数的综合方式：
+
+1.用interface原语设置为RAM或者FIFO
+
+2.用resource原语设置为单端口或者多端口RAM
+
+3.用RESOURCE原语设置RAM延迟，以模拟外部SRAM
+
+4.用ARRAY_PARTITION,ARRAY_MAP, ARRAY_RESHAPE来配置数组的结构。
+
+数组参数在函数体中必须显式指定大小: func(din_t in[4]){do-something}
+
+数组综合为FIFO的前提是:
+
+1.只能在一个函数或循环中被读入或者写出
+
+2.读写的顺序必须是相同的
+
+3.读写索引必须是编译时可分析的（顺序读取）
+
+Xilinx建议将用memory实现的数组加上static修饰符，这样不仅可以保证数组用memory来实现，又可以应用静态类型特殊的初始化行为：
+
+void func(){int coeff[4]={1,2,3,4};}
+
+上述代码综合之后，每次执行func()都需要四个周期来向RAM中写入四个初值。如果给coeff加上static修饰符，则系统仅在启动时从比特流中加载四个值到RAM，每次执行func()时，coeff都使用上次执行结果（与C的语义相同)，省去了加载初值的时间。也可以指定在reset时静态数组是否回到初始状态。如果需要，则需要额外的周期来加载初始值。
+
+给数组加上const修饰符可以让HLS将其综合为ROM，当然HLS也可以通过推断来生成ROM，以下规范有利于ROM推导：
+
+1.在函数中尽早地初始化数组
+
+2.将写操作组合在一起
+
+3.不要在初始化代码之间插入其它代码
+
+4.不要在同一位置写入不同的值
+
+5.元素值的计算不能使用编译时无法推断为常量的值
+
+HLS会根据操作数的位宽来选择最合适(最小)的器件，在生成结果时再根据被赋值类型的位数进行符号/无符号扩展或者截断。
+
+进行开方运算时，尽量避免double-float之间的转换，以节省硬件。
+
+float f=0.1;
+
+float val=sqrt(f);//涉及float->double和double->float的转换。
+
+上面的式子可以通过sqrtf来代替sqrt以避免硬件类型转换。
+
+HLS支持以下三种组合数据类型:struct,union,enum
+
+如果enum被用于top level function的参数，那么将会被综合为32bit以与C语言的代码兼容，如果enum用于内部设计，则会只保留足够的bit。
+
+HLS的union在使用时有以下限制：
+
+1.union on the top level function interface
+
+2.pointer reinterpretation for synthesis , a union cannot hold pointers to different types or to arrays of different types.
+
+3.accessing to a union through another variable
+
+4.the synthesis of unions doesnot support casting between native C type and user-defined types.
+
+volatile会影响RTL中会有多少次读或写操作，对函数接口上的指针的多次访问。
+
+任意精度数据类型在做算术运算时不支持volatile限定符
+
+函数声明中的static变量会被综合为寄存器，其初值存在于bitstreamk ，也不意味着每次reset时一定会被设置为初值。
+
+HLS会应用常量传播来精减不必要的硬件，用const饰符的数组会存在于ROM中，初值存在于bitstream中，reset的时候也不必更新。
+
+默认情况下，全局变量在RTL中不会暴露为端口，而是作为模块的内部RAM。想要暴露为端口，可以采用以下方法：
+
+1.使用extern限定符的全局变量会被综合为IO端口
+
+2.使用interface原语注解的全局变量会成为IO端口
+
+3.使用expose_global配置选项可以将所有的全局变量设置为IO端口
+
+使用static饰符的全局变量不会被综合淡IO端口
+
+编程规范建议少用全局变量
+
+HLS支持指向指针的指针，但是不能用于top level function的参数，如果跨函数使用指向指针的指针，HLS会将子函数内联。
+
+wires, handshake, or FIFO interface can be used only on streaming data. It can not be used in conjunction with pointer arithmetic, unless it indexes the data starting at zero and then processed sequentially.
+
+当top level function的指针参数被多次读取时，需要特别注意：最好使用volatile修饰符来确保操作是正确的。当函数的参数被多次访问时，最好使用stream库。
+
+流水化输入输出的三种方法：
+
+1.使用volatile修饰符
+
+2.使用stream
+
+3.其它
+
+HLS支持以下的C语言built-in函数：
+
+1.__builtin_clz(unsigned int x); 返回最右侧零的个数，x=0时行为未定义
+
+2.__builtin_ctz(unsigned int x); 返回x最左侧零的个数，x=0时行为未定义
+
+C+＋的hls::stream中的数据只能顺序访问，类似于一个无限深度的fifo.因此不允许多次读取同一组数据，因此要被多次读取的数据需要被缓存。在综合后，hls::stream会变成一个深度为1的fifo, 因此非常适合连接流水化的任务，在C中的数组也可以达到hls::stream的作用。
+
+最好将条件执行置于任务内，而不是条件执行某个任务。在CPU实现中，分支会导致性能下降，而在FPGA中则不会。
+
+在图像处理时，line buffer要存储K-1行图像，为了避免RAM读写瓶颈，最好用寄存器来实现。
+
+端口上的数据最好只读1次，如果需要复用，最好缓存起来。
+
+HLS断言的作用：用于暗示任意变量的范围
+
+1.在C代码仿真中确保条件成立，不成立则会终止仿真
+
+2.在综合时暗示HLS产生更准确的硬件资源及性能估计
+
+Vivado HLS的C/C++库包括:任意精度数据类型库、HLS Stream库、HLS Video库、HLS IP库，HLS线性代数库和HLS DSP库。
+
+C++不存在整形提升(integer promotion)问题，在C中为了避免整形提升导致的与RTL结果不一致，需要应用强制类型转换。
+
+在协同仿真时可以用hls_math.h替换标准库的math.h，二者的区别在于精度(因为底层实现不同)，使用前者可以保证C仿真与RTL仿真结果一致。
+
+HLS Videl库用于辅助基于C++的系统设计（hls_video.h), 包含头文件并使用hls名字空间即可使用视频库中的函数和数据类型，以及行缓冲(line buffer) memory window buffer. Video库中的函数与opencv兼容。
+
+HLS的IP库:
+
+* C: hls_fft.h, hls_fir.h, hls_dds.h
+
+* C++: ap_shift_reg.h
+
+HLS的线性代数库: cholesky, cholesky_inverse, matrix_multiply, qrf, svd, qr_inverse.
+
+HLS DSP库是C++库，atan2, awgn, cmpy, nco,  convolution_encoder, sqrt, qam_demod, qam_mod, viterbi_decoder.
+
+#接口协议的时序
+
+块级接口协议的握手信号约定：
+
+1.何时开始执行操作(输入信号ap_start拉高)，ap_idle输出信号拉低。ap_start信号至少持续到ap_ready信号拉高，当ap_ready拉高后，如果ap_start仍然有效，表示design开始下一轮操作，否则停止操作。
+
+2.何时操作结束(输出信号ap_done拉高), ap_done还做为ap_return的有效信号。
+
+3.何时design空闲并可以接受新的输入(输出ap_ready拉高)
+
+4.下游模块何时可以执行新的操作(输入信号ap_continue拉高)，可以由下游模块的ap_ready驱动。
+
+ap_none协议要求上游模块在合适的时间提供数据并一直保持到模块完成所有操作，下游模块要在合适的时机读取输出（组合逻辑单元），ap_none不能应用于数组参数。
+
+ap_stable协议用于那些数据可能改变但是在正常操作期间保持不变的接口（例如配置端口)。ap_stable通常用于输入端口，当应用于inout端口时，只能输入是认为稳定的。从ap_stable端口的扇出数据不需要缓存。
+
+ap_hs协议: 当ap_start有效后，ap_ready拉高，然后要检查in_vld信号，只有当in_vld信号有效时，模块才开始执行操作。接下来，out_ack有效表示输入数据己经被读取。当输出数据准备好以后，out_vld同时有效。此后如果in_ack无效，则停止所有操作。当in_ack有效后，out_vld在下一个周期无效。
+
+ap_ack协议：ap_hs的子集，仅有ack信号。当输入数据被读取时，out_ack有效(在同一个周期)，对于输出参数，当in_ack有效时表示己被下游模块读取，本模块可以进行下一轮操作（在此期间表示停顿)。协议没有信号表明输出己经可用。无法对一个输出端口应用了ap_ack协议的设计进行C/RTL协同仿真。
+
+ap_vld协议：ap_hs的子集，仅有vld信号。对于输入参数，当in_vld信号有效时，尽快读取输入数据，即使模块暂时无法使用新输入，也会缓存。对于输出数据，当数据有效时，out_vld也有效。
+
+ap_ovld:ap_hs的子集
+
+ap_memory和bram协议用于实现数组参数，二者功能相同，但是IP Integrator中的显示方式不同。这两个可以随机读写RAM和ROM。当只需要顺序读写时，使用ap_fifo协议。它省略了地址生成硬件。使用ap_memory协议时，用resource原语来指定数组的目标类型以及延迟。否则，HLS自行决定使用单/双端口的RAM(延迟默认为1)。该协议只有chip_enable, write_enable，没有read_enable。
+
+ap_fifo: 用于指针、数组、传引用参数，这类参数通常被读写多次，注意使用volatile. ap_fifo不能用于既有读也有写的函数参数。
+
+当ap_start有效以后，模块开始工作。不模块准备读取输入但是in_empty_n无效时，模块停止工作。否则，模块输出in_read信号，并在下一周期读取数据。当模块准备写出数据但是fifo为满时(out_full_n)，模块停止工作。否则输出out_write信号表示数据有效。当顶层函数或顶层循环被流水化并使用了rewind选项以后，HLS会创建一个额外的输出端口lwr，当双fifo的最后一次写操作完成以后，lwr拉高。
+
+使用ap_bus协议的函数参数如果是指针的话，可能会访问同一个变量多次。ap_bus有以下两种使用方式:
+
+* 标准模式：默认，独立执行每一次读/写操作
+* 猝发模式：当C代码使用memcpy时，使用猝发模式。在这种模式中，接口给出基地址和数据块大小，然后数据连续传输。用memcpy访问的数组不能被划分为寄存器。
+
+ap_bus的读时序:
+
+1.当总线桥fifo中没有要读的数据时(d_rsp_empty_n无效)：
+
+a.输出d_write_req有效，输出d_req_din无效
+
+b.输出address信号
+
+c.模块暂停，直到d_rsp_empty_n有效，输出d_rsp_read有效
+
+d.下一拍读取数据
+
+2.当d_rsp_empty_n有效时：
+
+a.输出d_write_req有效，输出d_req_din无效
+
+b.输出address信号
+
+c.下一拍d_rsp_read有效，同时读取数据
+
+ap_bus写操作:
+
+1.当总线桥fifo没有空间时(d_req_full_n无效):
+
+a.输出数据和地址并保持
+
+b.模块暂停，直至d_req_full_n有效，然后令d_req_write, d_req_din有效
+
+2.当d_req_full_n有效时：同时输出address, data, d_req_write, d_req_din即可。
+
+执行设计优化的第一步是为端口根据需要和硬件情况选择合适的IO协议。IO协议会影响设计可以施加的优化手段及设计的性能及成本。为HLS默认的设置，最好也显式地指定，以防止因为其他优化手段改变默认配置。
+
+block RAM的读操作需要两个周期：生成地址＋读取数据。当然，读操作是可以被流水化叠加的。
+
+Xilinx的DSP48乘法器是18位的。
+
+当memory容量小于1024bit时，通常采用LUT和FF来实现。
+
+建议将优化配置原语保存在单独的文件中，避免不同的方案之间相互干扰。
+
+无法在HLS的debug视图中调度使用任意精度的数据类型的C代码，唯一可用的手段是printf和fprintf，但是可以调度使用任意精度数据类型的C++和systemc代码。
+
+HLS的interface synthesis包括生成端口和增加IO协议两部分。
+
+HLS中的transaction等价于C函数的一次执行。
+
+ap_start在有效时模块开始执行操作，通常保持到ap_ready信号有效。
+
+ap_ready信号有效时表示模块可以接受新的输入数据，此时上一轮输入数据己经被全部读取，如果模块没有被流水化，这意味着模块己经完成了本轮操作。
+
+ap_done： 本轮事务己经完成，作为ap_return的有效信号。
+
+ap_continue: 当ap_done有效以后，ap_continue必须拉高才能开始下一轮事务。块级IO协议是对应于整个函数的，对应函数返回值，即便是函数没有返回值。
+
+ap_ctrl_none协议不支持C/RTL协同仿真，因为协同仿真需要块级接口协议来驱动仿真。
+
+当一个design的top level是循环时，可以为这个循环设置rewind选项，这样可以省去end of function and function restart cycles.让循环连续执行。
+
+当在设计中使用axi4-lite接口时，在IP核打包时会创建软件驱动程序代码，以方便外围的cpu控制该设备。
+
+ap_fixed<W,I>模板类的W和I分别代表定点数的总bit数和整数部分的bit数。
+
+流水化整个函数时，其内部的所有循环都会被展开，因此性能很高但是成本也很高。
+
+HLS的优化手段：
+
+1.自动优化：尽可能调度循环或函数中的操作并行执行
+
+2.流水化：面向循环和函数
+
+3.改变数组的物理实现以避免读写瓶颈。
+
+4.应用数据流优化
+
+5.改变函数的层次结果(inline)，嵌套循环合并
+
+6.人工修改C代码，避免数据依赖导致上述优化手段失效。
+
+HLS一次综合仅会报告一次调度失败信息。
+
+当dst对应block ram时，C代码中的dst[i]+=src之类的代码往往会令流水线interval>1。
+
+loop carried dependency: 当循环被流水化后，相邻两轮迭代对同一个变量的操作发生冲突。例如:本次循环读block ram，下次迭代写block ram。因此无法令II=1。可以通过循环变换来解决。
+
+在循环展开后，可能会出现对一个数组的并发访问。使block ram成为瓶颈。此时可以应用数组划分形成多个独立访问端口，也可以应用数组reshape，使用一个较宽的接口。
+
+在对数组应用fifo或stream时，必须保证数组是顺序访问的。且每个位置只被读写一次，为此，通常需要在设计时缓存乱序或重复访问的数据。
+
+HLS中的RTL验证指的就是C/RTL cosimulation。
+
+HLS中的原语#pragma是更像是对编译器的一种优化建议，而非强制编译器必须按照原语的指示生成RTL代码。另外，原语的组合顺序也会影响到最终生成的RTL。
