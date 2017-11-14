@@ -140,12 +140,12 @@ CNN每一层的输入是一系列输入特征映射($H_{in}\times W_{in}$)，输
 
 ``` c++
 for (l=0;l<num_layers;l++){//对每一层
-    for (row=0;row<R;row++){//对输出特征向量的每一行
-        for (col=0;col<C;col++){//对输出特征向量的每一列
+    for (row=0;row<R;row++){//对输出特征向量的每一行,输入的每一行有R*stride个feature
+        for (col=0;col<C;col++){//对输出特征向量的每一列,输入的每一列有C*stride个feature
             for (co=0;co<M;co++){//对每个输出特征映射的通道
                 for (ci=0;ci<N;ci++){//对每个输入特征映射的通道
-                    for (i=0;i<k;i++){//卷积核的行数
-                        for (j=0;j<k;j++){//卷积核的列数
+                    for (i=0;i<K;i++){//卷积核的行数
+                        for (j=0;j<K;j++){//卷积核的列数
                             Out[co][row][col]+=w[co][ci][i][j]*In[ci][stride*row+i][stride*col+j];
                         }
                     }
@@ -156,6 +156,36 @@ for (l=0;l<num_layers;l++){//对每一层
 }
 ```
 注：上面的算法应该是错误的，因为没有考虑padding（即$\forall x<0,\forall y<0, In[x][y]=0$）。
+
+一种取中心点的的优雅实现如下:
+``` c++
+for (l=0;l<num_layers;l++){//对每一层
+    for (row=0;row<R;row+＝stride){//对输入特征向量的每一行
+        for (col=0;col<C;col+=stride){//对输入特征向量的每一列
+            for (co=0;co<M;co++){//对每个输出特征映射的通道
+                for (ci=0;ci<N;ci++){//对每个输入特征映射的通道
+                    for (i=-K/2;i<=K/2;i++){//卷积核的行数
+                        for (j=-K/2;j<=K/2;j++){//卷积核的列数
+                            Out[co][row/stride][col/stride]+=w[co][ci][K/2+i][K/2+j]*GetIn(ci,row+i,col+j);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+int GetIn(int ci, int i, int j){
+    if (i<0 || i>=WIDTH)
+        return 0;
+    if (j<0 || j>=HEIGHT)
+        return 0;
+    return [ci][i][j];
+}
+```
+
+考虑加上stride和分块以后的代码如下：
+
 
 padding可以保证在步长为1的时候特征向量尺寸不变。
 
@@ -181,6 +211,15 @@ CNN的主要计算量都来自卷积层，以GoogleNet为例，占到90%左右�
 2.MIT Eyeriss:
 
 3.DianNao/DaDianNao/ShiDianNao/PuDianNao:
+
+现有的CNN加速器主要分为Ｓystolic型(tpu)、Ｍesh型(shidiannao)和Tiling型(diannao,dadiannao)。Systolic结构只能开发synapse并行，2d mesh只能开发神经元并行性，而tiling结构只能开发feature map的并行性。
+
+CNN的六重循环可以按照不同的维度进行展开，从而形成不同的加速器结构：
+* featuremap parallism: 按输入、输出通道
+* Neuron parallism:按feature点
+* Synapse paralism:按权重矩阵
+
+而整个加速器又可以进一步的分为８种处理风格，每种风格对应特定的并行模式的组合：ＳFSNMＳ，SFSNSS,SFMNSS,SFMNMS,MFSNSS,MFSNMS,MFMNSS,MFMNMS。现有的结构大多数是SFSNMS,SFMNSS,MFSNSS，分别对应systolic,2D Mesh和Tiling。
 
 ## FPGA加速方案
 ###概述
@@ -496,23 +535,60 @@ EIE对激活向量的非零检测做的不好，可以将非零检测去掉，�
 
 SCNN关注于卷积层的加速，是第一个面向稀疏矩阵压缩的加速器。当应用于全连接层的计算时效率不高。
 
-与EIE一样，SCNN也同时发掘了权重和特征映射的稀疏性。不同之处在于，EIE只对权重矩阵做了稀疏压缩编码，激活向量是以非零的方式存储和处理，只是最终CCU只广播非零的激活向量。而其它几种稀疏压缩方法则只部分发掘了权重或者特征映射中的稀疏性。Eyeriss通过在DRAM中存储压缩的特征映射来开发特征映射中存在的稀疏性，同时特征映射中的０值将被在传输和计算时被忽略。但是由于Eyeriss是应用在非剪枝网络上的，因此权重上的稀疏性不是非常显著，因此没有对于进行gating处理，而且即使做了gating也只是节省了功耗但是没有节省计算时间，而SCNN既节省了功耗又节省了时间；另外，eyeriss在DRAM之间传输数据时使用压缩格式，但是在计算时数据会被解压，因此不如SCNN这样节省功耗。Cnvlutin在Relu操作之后对特征映射进行压缩，而Cnvlutin更加激进，在数据移动和缓存时都使用压缩格式并跳过０值计算以改进能量效率和性能。当特征映射为０时，两种结构都会避免对权重的加载和访问。Cambricon-X只开发了权重稀疏性，对于特征映射中的０还是会引起计算开销。三种方法的本质区别在于最内层循环所发掘的空间、时间局部性的方法，即数据流模式(即嵌套循环采用哪种排列方式，每个循环如何进行划分以及如何并行。）：eyeriss使用row-stationary数据流，将权重矩阵和特征映射广播给每个PE，PE内执行０值检测。Cnvlutin用一个非０的特征映射与所有需要相乘的权重矩阵相乘，然后再以输入通道进行求和。Cambricon-X基于非０权重向量来在不同的输入通道中取激活向量，然后计算其点积，因此当特征映射中有０时会引入额外的计算开销。
+与EIE一样，SCNN也同时发掘了权重和特征映射的稀疏性。不同之处在于，EIE只对权重矩阵做了稀疏压缩编码，激活向量是以非零的方式存储和处理，只是最终CCU只广播非零的激活向量。而其它几种稀疏压缩方法则只部分发掘了权重或者特征映射中的稀疏性。Eyeriss通过在DRAM中存储压缩的特征映射来开发特征映射中存在的稀疏性，同时特征映射中的０值将被在传输和计算时被忽略。但是由于Eyeriss是应用在非剪枝网络上的，因此权重上的稀疏性不是非常显著，因此没有对权重进行压缩和gating处理，而且即使做了gating也只是节省了功耗但是没有节省计算时间，而SCNN既节省了功耗又节省了时间；另外，eyeriss在DRAM之间传输数据时使用压缩格式，但是在计算时数据会被解压，因此不如SCNN这样节省功耗。而Cnvlutin更加激进，在数据移动和缓存时都使用压缩格式并跳过０值计算以改进能量效率和性能,方法是在Relu操作之后对特征映射进行压缩。当特征映射为０时，eyeriss和cnvlutin两种结构都会避免对权重的加载和访问。Cambricon-X只开发了权重稀疏性，它对剪枝过的权重进行压缩，在计算时会自动跳过０值权重的乘法，但是对于特征映射中的０还是会引起计算开销。三种方法的本质区别除了开发稀疏性的差异以外，还在于最内层循环所发掘的空间、时间局部性的方法，即数据流模式(即嵌套循环采用哪种排列方式，每个循环如何进行划分以及如何并行。）：eyeriss使用row-stationary数据流，将权重矩阵和特征映射广播给多个标量PE，每个PE独立执行０值检测。在SCNN中使用的数据流被称为input stationary。Cnvlutin用一个非０的特征映射与所有需要相乘的权重矩阵相乘，然后再以输入通道进行求和。Cambricon-X基于非０权重向量来在不同的输入通道中取激活向量，然后计算其点积，因此当特征映射中有０时会引入额外的计算开销。
 
-SCNN采用的数据流称为PlanarTiled-InputStationary-CartesianProduct-Sparse，即PT-IS-CP-sparse。它可以充分利用权重矩阵和特征映射的稀疏性。IS描述该数据流的时间组成，即输入特征映射保持不变，让它与所有需要相乘的权重矩阵进行运算，这样可以最大化输入特征映射的复用，因此完整循环的最内层是$CH_{out}\to W\to H$。因此每个输入特征映射的点会为$CH_{out}$个输出特征映射贡献部分和。因为ＩS完全没有利用权重的时间局部性和空间局部性，为此可以考对$CH_{OUT}$维度进行分块。因此，数据流变成$CH_{out}/K_c\to CH_{in}\to W_{in}\to H_{in}\to K_c \to W_{out}\to H_{out}$。CP指的是迪卡尔积，每个PE中有一个CP阵列接受F个非零权重输入和I个非零特征映射输入。这里充分开发了权重矩阵的局部性，因为每个取办的权重值会与所有取出的输入特征映射进行乘法，而且所得的两两相乘的结果最终都是有意义的。PE同时跟踪每个乘积的坐标值(与乘法并行执行），通常一个crossbar将值和坐标送入对应的累加器。累加器阵列至少要配置$F\times I$个加法器以匹配乘法阵列的吞吐率。为了避免冲突，bank的数量设置为$2F\times I$,每个bank还包括一个加法器和若干个输出特征映射的表项。累加器的buffer是double-buffered，这样一部分buffer可以用于更新累加值，而另一部分buffer则用于为PPU提供输入。PlannarTiled是指对循环的$W_{in}$和$H_{in}$进行分块，以发掘输入特征映射的空间局部性，分块以后，每个PE处理其中一块，即$CH_{in}\times W_{in}/W_c\times H_{in}/H_c$。权重阵列会在PE之间进行广播，每个PE处理自己的那一部分输入特征映射，得到的输出特征映射在尺寸和维度上是$CH_{out}\times W_{in}/W_c\times H_{in}/H_c$,但是在不同的PE之间会有一定的重叠（即data halos）。解决的办法有两个：在划分输入特征映射时，让相邻的PE之间有一部分重叠区域；或者PE将halos部分的部分和数据传输给相邻的PE。二者的差异很小，在SCNN中采用的是后者，即output halos。
+SCNN很重要的一个设计目标就是尽可能地将激活向量存储在片上。由于激活向量也是采用压缩格式存放的，因此完全可以将所有的激活向量都存储在片上，避免层切换时的访问外存的开销。在这种情况下，在处理下一层时，只需要对换输出映射缓存和输入映射缓存即可。
 
-压缩的权重矩阵按照输出通道进行分组，$K_c\times R\times S$个权重压缩成一个block。类似的，输入特征映射按照输入通道进行分组，$W_t\times H_t$压缩成一个block。每次执行乘法时从权重buffer($K_c\times R\times S$）中取出F个非零值，再从输入buffer($W_t\times H_t$)中取出I个非零值。另外，weigth buffer和input buffer中压缩的坐标值也被会取出执行坐标计算，最终的坐标用于访问累加器。累加结果是以非压缩的方式存储的，因此累加结果在经过ReLU之前为零的可能性较低。累加器阵列分散在不同的PE当中，每个PE中存储$K_c\times W_{t}\times H_t$个累加和，每个PE内部的累加器阵列进一步分成若干个bank，乘法阵列的结果根据地址经过crossbar送入不同的bank，再根据地址累加到正确的部分和上。当每一组输出通道完成计算以后，累加器的结果排空并压缩后存入输出buffer。
+ＰＥ中包含一个乘法器队列，每次接受一个非零权重向量和非零激活向量的迪卡尔乘积，注意由于zero padding的存在，权重和激活向量中也是存在一些零值的。为了尽可能地复用数据，激活向量采用input-stationary的方式与权重矩阵相乘，即固定一组输入激活向量不变，让它与尽可能多的权重相乘。因为要考虑到权重的重用，因此不能与全部的权重相乘。为了将对应点的乘积相加，SCNN需要跟踪每个乘积对应的坐标，然后以坐标为索引将乘积累加到正确的累加器上。
 
-在SCNN中，多个PE并行工作，每个PE负责输入特征映射的一部分３D区域，通常有６４个PE。每个PE有一个乘法器阵列，通常是$4\times 4$，阵列接受非零权重和特征映射作为输入并输出所有输入组合的乘法结果，即执行迪卡尔积乘法。为了减少数据访问开销，所有特征映射以input stationary的方式一一系列权重相乘。每个PE包含接收权重和输入特征映射的通道，以及输出特征映射的通道，另外，相邻PE之间还包括交换halos的通道。另外，SCNN还包括一个layer sequencer用于编排权重和特征映射在芯片和DRAM之间的移动，每一层都对应一系列用于配置layer sequencer的参数。每个PE包含一个用于控制本地计算的状态机。每个PE包含一个weight buffer, input activation RAM, output activation RAM,一个乘法器，一个crossbar, 一个累加器bank以及一个后处理单元(PPU)，ＰPＵ主要完成以下三种工作：１。在相邻PE之间交换halos值；　２。应用ReLU，pooling, dropout等功能；３。压缩输出特征映射并将结果写入output activation buffer.　
+数据流的选择会影响加速器的性能、芯片面积和功耗。SCNN采用的数据流称为PlanarTiled-InputStationary-CartesianProduct-Sparse，即PT-IS-CP-sparse。在所有可能的循环排列方式中，即数据流模式中，它可以充分利用权重矩阵和特征映射的稀疏性。从输入缓存中读取的一组激活向量先缓存在寄存器堆中，方便后续与权重的相乘，这样还可以避免频繁地访问SRAM。IS描述该数据流的时间组成，即输入特征映射保持不变，让它与所有需要相乘的权重矩阵进行运算，这样可以最大化输入特征映射的复用，因此完整循环的最内层是$CH_{out}\to K_h\to K_v$。其中，卷积核的大小为$K_h\times K_v$。因此每个输入特征映射的点会为$CH_{out}$个输出通道贡献部分和，共计$CH_{out}\times (２K_h－１)\times (2K_v-1)$个输出特征映射点.而固定了$CH_{in}$中的一个点，共有$CH_{out}$个$K_h\times K_v$的卷积核，因此共有$CH_{out}\times K_h\times K_v$次乘法。因为ＩS完全没有利用权重以及累加单元的时间局部性和空间局部性，为此可以考对权重按照$CH_{OUT}$维度进行分组(每组$K_c$个输出通道），这样输出累加单元以及权重缓存单元每次迭代只缓存$CH_{out}$中的一组，即$CH_{in}\times K_c\times K_h\times　K_v$个权重，$CH_{in}\times W_{in}\times H_{in}$个输入特征和$K_c\times W_{in}\times H_{in}$个部分和(考虑zero padding以后的结果)。每次迭代，权重buffer都需要重新填充，累加单元都需要排空和清零，累加单元的数据在排空时先经过ReLU再将结果直接赋值给输出特征映射缓存，但是输入激活向量则保持不变。因此，数据流变成$CH_{out}/K_c\to CH_{in}\to W_{in}\to H_{in}\to K_c \to K_h\to K_v$。CP指的是迪卡尔积，每个PE中有一个CP阵列接受F个非零权重输入和I个非零特征映射输入。这里充分开发了权重的空间局部性，因为每次取出的$F$个权重值会与所有取出的输入特征映射进行乘法，而且所得的两两相乘的结果最终都是有意义的。PE同时跟踪每个乘积的坐标值(坐标计算与乘法并行执行），通常一个crossbar将值和坐标送入对应的累加器。累加器阵列至少要配置$F\times I$个加法器以匹配乘法阵列的吞吐率。为了避免冲突，bank的数量设置为$2F\times I$,每个bank还包括一个加法器和若干个输出特征映射的表项。累加器的buffer是double-buffered，这样一部分buffer可以用于更新累加值，而另一部分buffer则用于为PPU提供输入。PlannarTiled是指对循环的$W_{in}$和$H_{in}$进行分块，以发掘输入特征映射的空间局部性。分块以后，每个PE处理其中一块，即$CH_{in}\times W_{in}/W_c\times H_{in}/H_c$。权重会在PE之间进行广播，每个PE处理自己的那一部分输入特征映射，得到的输出特征映射在尺寸和维度上是$CH_{out}\times W_{in}/W_c\times H_{in}/H_c$,但是在不同的PE之间会有一定的重叠（即data halos）。解决的办法有两个：(１）在划分输入特征映射时，让相邻的PE之间有一部分重叠区域，即input halos；(2)或者PE将halos部分的部分和数据传输给相邻的PE,即output halos。二者的差异很小，在SCNN中采用的是后者，即output halos。计算出的X,Y坐标中小于０和大于$W_{in}/W_c$或者$H_{in}/H_c$的都属于output halos。为了索引累加单元，需要一个三维坐标$K=Kcoord(K_c\times K_h\times K_v,F)$, $X=XCoord(W/W_c\times H/H_c/I,I,K_c\times K_h\times K_v,F)$,$Y=YCoord(W/W_c\times H/H_c/I,I,K_c\times K_h\times K_v,F)$。
 
-压缩仍然使用CSC的变种，但是与EIE有所不同。在压缩时权重时，权重矩阵先根据输出通道进行分组，在每一组内，把所有权重矩阵按行展平为一维后拼接在一起构成非稀疏的权重序列，然后用两个向量v和z来进行压缩表示。其中v中存储稀疏矩阵的非零值，z[0]中存储v中非零值的个数，z[i]用于存储v[i]后面有几个零。对输入特征映射，按照$H_t\times W_t\times Ch_{in}$分块以后，按$CH_{in}\to H_t\to W_t$的顺序进行序列化，然后应用同样的压缩方法。权重和激活向量的索引值都是４bit，因此也会有zero-padding的情况出现。输出坐标可以用(零的个数+非零个数)/维度的方法得到，因此维度最好是２的整数次幂。
+```
+Buffer in_buf[CHin][Wt*Ht/I][I];
+Buffer out_buf[CHout/Kc][Kc*Wt*Ht];
+Buffer wt_buf[CHin][Kc*Kh*Kv/F][F];
+Buffer acc_buf[Kc][Wt+Kh-1][Ht+Kv-1];
+
+for (i=0;i<CHout/Kc;i++){
+    for (j=0;j<CHin;j++){
+        for (k=0;k<Wt*Ht/I;k++){
+            in[0:I-1]=in_buf[c][k][0:I-1];
+            for (l=0;l<Kc*Kv*Kh/F;l++){
+                wt[0:F-1]=wt_buf[j][l][0:F-1];
+                parallel_for (m=0 to I-1) x (f=0 to F-1){
+                    k=Kcoord(l,f);
+                    x=Xcoord(k,m,l,f);
+                    y=Ycoord(k,m,l,f);
+                    acc_buf[k][x][y] += in[m]*wt[f];
+                }
+            }
+        }
+    }
+    out_buf[i][0:Kc*Wt*Ht-1]=acc_buf[0:Kc-1][0:Wt-1][0:Ht-1];
+}
+```
+
+为了方便每个PE以压缩的方式访问权重，权重矩阵按照输出通道进行分组后再进行压缩，$K_c\times K_h\times K_v$个权重压缩成一个block，这样每个PE即可独立解码权重坐标。类似的，输入特征映射按照输入通道进行分组，即每个输入通道的$W/W_c\times H/H_c$个特征压缩成一个block。每次执行乘法时从权重buffer($K_c\times R\times S$）中取出F个非零值以及它们对应的坐标，再从输入buffer($W_t\times H_t$)中取出I个非零值以及它们对应的坐标。weigth buffer和input buffer中压缩的坐标值会用于访问累加器。累加结果是以非压缩的方式存储的，因为累加结果在经过ReLU之前为零的可能性较低。乘法阵列输出的$F\times I$个乘积在地址上通常不是连续的，但是都落在$K_c\times W/W_c\times H/H_c$范围内。累加器阵列分散在不同的PE当中，每个PE中存储$K_c\times W/W_c\times H/H_c$个累加和，每个PE内部的累加器阵列进一步分成若A个bank，每个bank包含加法器和一个累加buffer。乘法阵列的输出结果根据地址经过crossbar送入不同的bank，再根据地址累加到正确的部分和上。当每一组输出通道完成计算以后，累加器的结果排空并压缩后存入输出buffer。为了减少每个周期落在同一个bank的乘积产生的冲突，可以令$A=2\times F\times I$。另外，每个bank中的buffer也采用双份，这样一份可以用于执行累加操作，而另一份则可以被PPU进行排空。
+
+ＳCNＮ上也可以实现pooling, pooling通常放在ReLU之后。也可以用于加速全连接层，但是效率较低。
+
+在SCNN中，多个PE并行工作，而且通过一个仲裁总线进行互连，每个PE负责输入特征映射的一部分不重叠的３D区域。相邻区域之间的乘积需要共享，因为相邻PE对应的输出映射存在halos。通常有６４个PE。每个PE有一个乘法器阵列，通常是$4\times 4$。每个PE包含接收权重和输入特征映射的通道，以及输出特征映射的通道，另外，相邻PE之间还包括交换halos的通道。另外，SCNN还包括一个layer sequencer用于编排权重和特征映射在芯片和DRAM之间的移动，每一层都对应一系列用于配置layer sequencer的参数。layer sequencer用于驱动所有PE工作，并且连接到DRAM控制器上。它还负责将权重通过总线广播给每个PE并控制输入激活向量进入PE和输出激活向量离开PE，注意，激活向量也通过仲裁总线与DRAM进行数据读写。
+
+每个PE包含一个用于控制本地计算的状态机，一个weight buffer, input activation RAM, output activation RAM,一个乘法器，一个crossbar, 一个累加器bank以及一个后处理单元(PPU)，ＰPＵ主要完成以下三种工作：１。在相邻PE之间交换halos值；　２。应用ReLU，pooling, dropout等功能；３。压缩输出特征映射并将结果写入output activation buffer.　
+
+压缩仍然使用CSC的变种，但是与EIE有所不同。在压缩时权重时，权重矩阵先根据输出通道进行分组(每组ci个权重矩阵)，在每一组内，把所有权重矩阵依次按行展平为一维后拼接在一起构成一个未压缩的权重序列，然后用两个向量v和z来进行压缩表示。其中值向量v中存储稀疏矩阵的非零值(zero padding会插入一些零），索引向量z[0]中存储v中非零值的个数，z[i]用于存储v[i]前面有几个连续的零。对输入特征映射，按照$H/H_c\times W/W_c\times Ch_{in}$分块以后，按$CH_{in}\to H/H_c\to W/W_c$的顺序进行序列化，即对每个通道的二维特征映射先按行展成１维再与其它通道展开的一维向量进行拼接，然后应用同样的压缩方法。权重和激活向量的索引值都是４bit，因此也会有zero-padding的情况出现,每隔１５个零插入一个０元素，但是值向量的位宽可以不是４bit。某个点对应的压缩前的坐标可以用(零的个数+非零个数)/维度的方法得到，因此维度最好是２的整数次幂。在恢复压缩前的坐标之后可以用于索引累加器。
 
 对于超大规模的网络卷积层，SCNN也会进行分批处理，每个PE一次操作一部分特征映射。这种方法会导致重复加载一部分输入特征映射，因此作者建议在设计网络中尽量不要使用较大的卷积层。
 
+为了满足HD视频的实时处理，乘法阵列可以采用$32\times 32$。
+
+当权重和激活向量的稀疏度均大于1５%时，SCNN的计算能耗比会超过通常的非压缩结构。
+
 PE之间的barrier以及PE内部的乘法阵列都会导致性能的下降。
 
-权重用１６个数表示可以理解?激活向量为什么可以？
-
 SCNN的一个好处是与卷积核大小无关，可以适应任意大小的卷积核。
+
+SCNN的论文对当前的加速器实现进行了高度的抽象和总结。
 
 
 ###量化
