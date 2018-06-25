@@ -131,6 +131,8 @@ Leaky ReLU保证在 z<0 的时候，梯度仍然不为0。
 ## 原理
 任何采用有限数量神经元的二层神经网络都是universal approximator，可以以任意精度近似任何连续函数，详见[Nielsen][3]第四章。
 
+<a href="" target="_blank"><img src="figures/outputwh.png"/></a>
+
 ## CNN核心算法
 CNN每一层的输入是一系列输入特征映射($H_{in}\times W_{in}$)，输出是一系列输出特征映射($H_{out}\times W_{out}$)，输出是由输入和filter kernel通过卷积计算得到的。本层的输出成为下一层的输入。
 
@@ -737,6 +739,27 @@ ZynqNet每一层的输入输出特征映射以及权重只进出FPGA一次，己
 
 ZynqNet是一种CNN拓扑结构，在GPU上训练，在FPGA上执行推理。
 
+#CNN加速器分类
+CNN的核心计算模式如下图所示:
+<a href="" target="_blank"><img src="figures/origin.png"/></a>
+通过对每个循环引入分块因子，得到如下的循环:
+<a href="" target="_blank"><img src="figures/unroll.png"/></a>
+可见，CNN的计算中可挖掘的并行性主要有三类，featuremap级(Tm,Tn)并行FP,neuron级(Tr,Tc)并行NP，synapse级(Ti,Tj)并行SP。这里的Tr,Tc实际上是对应于输出神经元的，而且将kernel级并行隐含在FP和NP之间。synapse对应于一个kernel中的一个权重，而neuron对应于featuremap中的一个点。FP,NP和SP的组合会形成８种加速器结构，而当前己有的CNN加速器实际上只实现了其中的三种，即systolic,2D-mapping和tiling，分别开发了SP,NP和FP。但是在一个网络中，可能某一层FP占优，而另一层NP或SP占优，这就导致对于特定的网络，现有的加速器无法发挥其最高性能，因为只支持特定类型并行的计算引擎无法完全覆盖CNN的所有的负载类型。如果Tm=Tn=1，则表示加速器没有开发FP，类似的，如果Tr=Tc=1或Ti=Tj=1则表示加速器没有开发NP或SP.实际上，如果将每个分块因子独立看待，则对应６４种加速器类型。一个理想的加速器应该能够支持所有６４种并行类型，但是每一种并行模式都需要不同类型的数据流，因此同时支持这些并行类型是非常困难和复杂的。数据流描述了数据在不同的PE之间分派、汇聚和更新的方式。
+
+脉动方式:每次处理一个ci和一个co中的kxk的neuron，只开发了SP。每个PE组织成K行K列的阵列，同一行的PE相互串联，相邻行之间通过FIFO连接，每个FIFO的深度等于featuremap的宽度减去K。每个PE包含一个乘加器和两个寄存器(一个用于存储常量权重，一个用于存储部分和)。整个脉动阵列是一个非常深的流水线，整个流水线的深度等于featuremap的宽度乘以K。在每个时钟，向阵列中的每个PE输入一个neuron，并执行乘加操作，然后将结果传递下一个PE。在流水线的最后一段会输出最终的结果并写回内存。处理一个co的周期数等于输出feturemap的大小减去流水线的填充时间。这种计算模式的本质是将相邻的输出featuremap点的计算映射到不同的流水段并且利用了权重数据。
+
+3D-meshing：每拍从一个ci中读feature,用于计算一个co中的TrxTc个neuron的部分和，每个output neuron都需要KxK拍才能得到。每个PE通过内部链接连接到周围四个PE上，每个PE包含一个乘法器，一个加法器和两个FIFO用于暂存邻居PE将要复用的数据。初始情况下，TrxTc个输入neuron和一个synapse被广播给每个PE。之后的每个周期向阵列送入１个synapse和Tr或Tc个神经元，并从左向右移动。每个PE负责计算一个输出neuron。
+
+Tiling:与DaDianNao,Cnvlutin相同，每个时钟周期处理多个ci和多个co。
+
+In reality, the dominant parallel type changes greatly across different CONV layers. 在Flexflow中，作者是提出一种互补原则来发掘资源利用率，以弥补峰值性能和实际性能之间的差异。flexflow利用了FP,SP和NP之间的并行性，因此可以支持所有类型的并行加速。为此，flexflow修改了每个PE的内部结构和PE之间的连接关系，以便于动态的映射不同类型的并行性以占满所有的PE。关键是设计一种灵活的数据流来为每种类型的并行提供数据。
+
+flexflow包含四个关键组件，一个卷积单元，一个pooling单元，三个片上buffer(分别用于存储输入feature,输出feature和kernel），以及一个指令解码器。卷积单元中的PE以mesh结构互连，每个PE包含一个乘法器，一个加法器，一个neuron local store, a kernel local store and a controller.　每一行的PE的输出连接到一个加法树上，加法结果是一个output neuron。PE之间不需要交换数据。For PEs in FlexFlow, operands are directly derived from on-chip buffers through vertical and horizontal buses to each PE, and buffered in randomly accessed local storages.由于PE之间没有了依赖关系，NP,SP和FP可以以分时的方式在同一个PE阵列上实现:
+1.N个PE行分别用于计算一个output featuremap的N个output neuron，因此可以实现NP。
+2.Ｎ个PE行分别计算N个output featuremap中的一个output neuron，或者让一个PE列分别计算N个输入featuremap的neuron，因此可以实现FP。
+3.把一个PE行分配给一个input featuremap的一个卷积窗口，可以实现SP.
+
+不仅可以分时实现多种并行模式，还可以同时支持FP和NP（称为inter row complementary effect）,或者FP和SP(称为Intra-row complementary effect)来进一步的提高资源利用率.当然，灵活的数据流意味着复杂的互连关系。flexflow的连接分为三个子连接，Dataflow1用于将数据分发到每个PE，dataflow2用于每个PE内部将数据从local store分发到乘加器，Dataflow3用于将数据从neuron和kernel buffer到分布式网络。为了降低功耗并简化互连，需要隐将反复传输的数据量降到最低。因此，对于dataflow1，用vertical (neurons） common data buses (CDB)来广播neuron，用horizontal (kernels) common data buses来广播kernel。为了简化CDB，关键是最小化重复传输的数据量。两个方向的CDB都只有数据线没有地址线和控制线，而且以流水线的形式传输数据，同时作者提出了两种数据传输优化方法：Relax Alignment(RA)和Relax Synchronization (RS)。根据互补原则，不同PE行用于输入同一像素点或相邻像素点的output neuron，因此这些PE的input neuron是分部或者完全重叠的，同理，不同PE行的权重也是部分或全部重叠的。RA的思路是对权重进行重排序，而且为了简化互连结构，kernel会事先分发给每个PE，也样也可以起到重用的目的。RS的基本思想是为每个PE预先加载一些数据，以减少重复传输的数据量。由于RS和RA，FlexFlow是一种异步处理结构，因为同一时刻被传输的数据会在不同时候被使用。每个PE有一个neuron local store和一个kernel local store。Dataflow2负责从local store中取数据给PE中的乘加计算单元，Dataflow2由一个有限状态机来控制。Dataflow3负责在distribution layer和三维buffer bank之间平滑数据传输。针对Dataflow3实现了In-Advanced Data Placement(IADP)和In-Place Data Replication(IPDR)两种优化策略来利用空闲带宽进行数据广播。为了匹配横向和纵向CDB的数据访问格式，需要根据PE阵列的分组情况来安排片上缓存中的数据排布。有两种类型的IADP，一种是从外存到neuron buffer,另一种是在neuron buffer之间进行中间数据的读写。
 
 #参考文献
 [1]: https://github.com/ethereon/netscope 
